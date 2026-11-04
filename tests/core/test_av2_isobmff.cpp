@@ -691,22 +691,15 @@ TEST(AV2ISOBMFFTest, PixiBoxAndCodecsStringDerivation) {
                                      parsed_pixi_trailing));
   EXPECT_EQ(parsed_pixi_trailing.channels.size(), 4u);
 
-  // Codecs string matches av2-isobmff #codecsparam example (with av2E 4CC)
+  // Codecs string matches y-guyon/codecs_string: <sample_entry_4cc>.<max_profile_idc><max_level_idx><max_tier>
   auto colr_opt = extract_colr_info(parser);
   ASSERT_TRUE(colr_opt.has_value());
   const auto* first_sh = dynamic_cast<const SequenceHeaderOBU*>(parser.obus()[1].get());
   ASSERT_NE(first_sh, nullptr);
   std::string codecs = build_codecs_string("av2E", first_sh->sequence_header(), pixi, *colr_opt);
-  EXPECT_EQ(codecs, "av2E.0.04M.10.4.22.09.16.09.0");
-
-  // Default suffix ".3.22.01.01.01.0" should be omitted
-  PixiBox default_pixi;
-  default_pixi.channels = pixi.channels;
-  default_pixi.channels.pop_back();  // Remove alpha -> 3 channels
-  ColrInfo default_colr{1, 1, 1, 0};
-  std::string short_codecs =
-      build_codecs_string("av2E", first_sh->sequence_header(), default_pixi, default_colr);
-  EXPECT_EQ(short_codecs, "av2E.0.04M.10");
+  EXPECT_EQ(codecs, "av2E.04M");
+  EXPECT_EQ(build_codecs_string("av2e", 2, 12, 1), "av2e.2CH");
+  EXPECT_EQ(build_codecs_string("av2E", 31, 31, 0), "av2E.VVM");
 
   std::remove(fname.c_str());
 }

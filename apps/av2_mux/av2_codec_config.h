@@ -121,7 +121,14 @@ struct PixiBox {
   static PixiBox from_parser(const OBUParser& parser);
 };
 
-// Builds the RFC 6381 Codecs parameter string per av2-isobmff #codecsparam.
+// Builds the RFC 6381 Codecs parameter string per av2-isobmff #codecsparam:
+// <sample_entry_4cc>.<max_profile_idc><max_level_idx><max_tier>
+std::string build_codecs_string(const std::string& sample_entry_4cc,
+                                uint8_t max_profile_idc,
+                                uint8_t max_level_idx,
+                                uint8_t max_tier);
+std::string build_codecs_string(const std::string& sample_entry_4cc,
+                                const InBandAV2CodecConfigurationBox& inband);
 std::string build_codecs_string(const std::string& sample_entry_4cc,
                                 const AV2SequenceHeader& first_sh,
                                 const PixiBox& pixi,

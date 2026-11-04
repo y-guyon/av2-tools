@@ -681,38 +681,33 @@ PixiBox PixiBox::from_parser(const OBUParser& parser) {
   return pixi;
 }
 
+static char to_base32_char(uint8_t val) {
+  val &= 0x1F;
+  return val < 10 ? static_cast<char>('0' + val) : static_cast<char>('A' + (val - 10));
+}
+
+std::string build_codecs_string(const std::string& sample_entry_4cc,
+                                uint8_t max_profile_idc,
+                                uint8_t max_level_idx,
+                                uint8_t max_tier) {
+  const char tier_char = (max_tier == 0) ? 'M' : 'H';
+  return fmt::format("{}.{}{}{}", sample_entry_4cc, to_base32_char(max_profile_idc),
+                     to_base32_char(max_level_idx), tier_char);
+}
+
+std::string build_codecs_string(const std::string& sample_entry_4cc,
+                                const InBandAV2CodecConfigurationBox& inband) {
+  return build_codecs_string(sample_entry_4cc, inband.max_profile_idc, inband.max_level_idx,
+                             inband.max_tier);
+}
+
 std::string build_codecs_string(const std::string& sample_entry_4cc,
                                 const AV2SequenceHeader& first_sh,
-                                const PixiBox& pixi,
-                                const ColrInfo& colr) {
-  const char tier_char = (first_sh.seq_tier == 0) ? 'M' : 'H';
-
-  bool has_alpha = false;
-  uint8_t sub_type = 0;
-  uint8_t sub_loc = 0;
-  for (const auto& ch : pixi.channels) {
-    if (ch.channel_idc == 5) {
-      has_alpha = true;
-    }
-    if ((ch.channel_idc == 3 || ch.channel_idc == 4) && ch.subsampling_flag) {
-      sub_type = ch.subsampling_type;
-      sub_loc = ch.subsampling_location;
-    }
-  }
-
-  const uint32_t channel_count = first_sh.NumPlanes + (has_alpha ? 1u : 0u);
-  const std::string prefix =
-      fmt::format("{}.{}.{:02d}{}.{:02d}", sample_entry_4cc, first_sh.seq_profile_idc,
-                  first_sh.seq_level_idx, tier_char, first_sh.BitDepth);
-  const std::string suffix = fmt::format(
-      ".{}.{}{}.{:02d}.{:02d}.{:02d}.{}", channel_count, sub_type, sub_loc,
-      colr.colour_primaries, colr.transfer_characteristics, colr.matrix_coefficients,
-      colr.full_range_flag);
-
-  if (suffix == ".3.22.01.01.01.0") {
-    return prefix;
-  }
-  return prefix + suffix;
+                                const PixiBox& /*pixi*/,
+                                const ColrInfo& /*colr*/) {
+  return build_codecs_string(sample_entry_4cc, static_cast<uint8_t>(first_sh.seq_profile_idc),
+                             static_cast<uint8_t>(first_sh.seq_level_idx),
+                             static_cast<uint8_t>(first_sh.seq_tier));
 }
 
 }  // namespace av2_obu
