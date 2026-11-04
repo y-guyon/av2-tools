@@ -82,14 +82,14 @@ inline bool operator!=(const OutOfBandAV2CodecConfigurationBox& a,
 // InBandAV2CodecConfigurationBox ('av2c') per av2-isobmff:
 //   aligned(8) class InBandAV2CodecConfigurationBox extends AV2CodecConfigurationBox('av2c') {
 //     unsigned int(3) reserved1 = 0;
-//     unsigned int(2) max_num_streams_minus_1;
+//     unsigned int(2) max_num_streams_minus1;
 //     unsigned int(5) max_profile_idc;
 //     unsigned int(5) max_level_idx;
 //     unsigned int(1) max_tier;
 //   }
 struct InBandAV2CodecConfigurationBox {
   uint8_t reserved1 = 0;
-  uint8_t max_num_streams_minus_1 = 0;
+  uint8_t max_num_streams_minus1 = 0;
   uint8_t max_profile_idc = 0;
   uint8_t max_level_idx = 0;
   uint8_t max_tier = 0;

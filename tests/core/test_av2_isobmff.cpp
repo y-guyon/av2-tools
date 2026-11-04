@@ -574,7 +574,7 @@ TEST(AV2ISOBMFFTest, OutOfBandAV2CodecConfigurationBoxSerializeParseAndOrdering)
 TEST(AV2ISOBMFFTest, InBandAV2CodecConfigurationBoxSerializeAndParse) {
   InBandAV2CodecConfigurationBox inband;
   inband.reserved1 = 0;
-  inband.max_num_streams_minus_1 = 2;  // 3 streams
+  inband.max_num_streams_minus1 = 2;  // 3 streams
   inband.max_profile_idc = 5;
   inband.max_level_idx = 12;
   inband.max_tier = 1;
@@ -585,7 +585,7 @@ TEST(AV2ISOBMFFTest, InBandAV2CodecConfigurationBoxSerializeAndParse) {
   InBandAV2CodecConfigurationBox parsed;
   ASSERT_TRUE(InBandAV2CodecConfigurationBox::parse(bytes.data(), bytes.size(), parsed));
   EXPECT_EQ(parsed.reserved1, 0u);
-  EXPECT_EQ(parsed.max_num_streams_minus_1, 2u);
+  EXPECT_EQ(parsed.max_num_streams_minus1, 2u);
   EXPECT_EQ(parsed.max_profile_idc, 5u);
   EXPECT_EQ(parsed.max_level_idx, 12u);
   EXPECT_EQ(parsed.max_tier, 1u);
@@ -597,7 +597,7 @@ TEST(AV2ISOBMFFTest, InBandAV2CodecConfigurationBoxSerializeAndParse) {
   InBandAV2CodecConfigurationBox parsed_trailing;
   ASSERT_TRUE(InBandAV2CodecConfigurationBox::parse(bytes_with_trailing.data(),
                                                     bytes_with_trailing.size(), parsed_trailing));
-  EXPECT_EQ(parsed_trailing.max_num_streams_minus_1, 2u);
+  EXPECT_EQ(parsed_trailing.max_num_streams_minus1, 2u);
   EXPECT_EQ(parsed_trailing.max_profile_idc, 5u);
   EXPECT_EQ(parsed_trailing.max_level_idx, 12u);
   EXPECT_EQ(parsed_trailing.max_tier, 1u);
@@ -618,7 +618,7 @@ TEST(AV2ISOBMFFTest, InBandAV2CodecConfigurationBoxSerializeAndParse) {
   ASSERT_TRUE(parser.parse_file(fname));
 
   auto derived = InBandAV2CodecConfigurationBox::from_parser(parser);
-  EXPECT_EQ(derived.max_num_streams_minus_1, 2u);
+  EXPECT_EQ(derived.max_num_streams_minus1, 2u);
   EXPECT_EQ(derived.max_profile_idc, 4u);
   EXPECT_EQ(derived.max_level_idx, 10u);
   EXPECT_EQ(derived.max_tier, 1u);

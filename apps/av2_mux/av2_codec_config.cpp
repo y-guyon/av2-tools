@@ -353,7 +353,7 @@ bool OutOfBandAV2CodecConfigurationBox::parse(const uint8_t* data, size_t size,
 
 std::vector<uint8_t> InBandAV2CodecConfigurationBox::serialize() const {
   uint8_t b0 = static_cast<uint8_t>(((reserved1 & 0x07) << 5) |
-                                    ((max_num_streams_minus_1 & 0x03) << 3) |
+                                    ((max_num_streams_minus1 & 0x03) << 3) |
                                     ((max_profile_idc >> 2) & 0x07));
   uint8_t b1 = static_cast<uint8_t>(((max_profile_idc & 0x03) << 6) |
                                     ((max_level_idx & 0x1F) << 1) |
@@ -365,7 +365,7 @@ bool InBandAV2CodecConfigurationBox::parse(const uint8_t* data, size_t size,
                                            InBandAV2CodecConfigurationBox& out) {
   if (!data || size < 2) return false;
   out.reserved1 = (data[0] >> 5) & 0x07;
-  out.max_num_streams_minus_1 = (data[0] >> 3) & 0x03;
+  out.max_num_streams_minus1 = (data[0] >> 3) & 0x03;
   out.max_profile_idc = static_cast<uint8_t>(((data[0] & 0x07) << 2) | ((data[1] >> 6) & 0x03));
   out.max_level_idx = (data[1] >> 1) & 0x1F;
   out.max_tier = data[1] & 0x01;
@@ -390,7 +390,7 @@ InBandAV2CodecConfigurationBox InBandAV2CodecConfigurationBox::from_parser(
       if (!msdo) continue;
       if (msdo->num_streams() >= 2) {
         uint8_t minus_1 = static_cast<uint8_t>(std::min<uint32_t>(3, msdo->num_streams() - 1));
-        box.max_num_streams_minus_1 = std::max(box.max_num_streams_minus_1, minus_1);
+        box.max_num_streams_minus1 = std::max(box.max_num_streams_minus1, minus_1);
       }
       box.max_profile_idc = std::max<uint8_t>(
           box.max_profile_idc, static_cast<uint8_t>(msdo->multistream_profile_idc()));
