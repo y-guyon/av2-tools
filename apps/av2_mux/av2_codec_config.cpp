@@ -715,4 +715,85 @@ std::string build_codecs_string(const std::string& sample_entry_4cc,
   return prefix + suffix;
 }
 
+std::vector<std::pair<uint8_t, uint8_t>> collect_ordered_layers(const OBUParser& parser) {
+  std::set<std::pair<uint8_t, uint8_t>> active_layers;
+  for (const auto& obu : parser.obus()) {
+    const uint8_t xid = obu->header().get_xlayer_id();
+    const uint8_t mid = obu->header().get_mlayer_id();
+    if (obu->type() == OBUType::SEQUENCE_HEADER && xid != GLOBAL_XLAYER_ID) {
+      active_layers.insert({xid, 0});
+    } else if (obu->type() == OBUType::LAYER_CONFIGURATION_RECORD) {
+      if (const auto* lcr = dynamic_cast<const LayerConfigurationRecordOBU*>(obu.get())) {
+        if (lcr->is_global()) {
+          for (const auto& gp : lcr->global_payloads()) {
+            const uint8_t gp_xid = static_cast<uint8_t>(gp.xlayer_id);
+            if (gp.xlayer_info.embedded_layer_info_present) {
+              for (const auto& el : gp.xlayer_info.embedded_layers) {
+                active_layers.insert({gp_xid, static_cast<uint8_t>(el.mlayer_id)});
+              }
+            } else {
+              active_layers.insert({gp_xid, 0});
+            }
+          }
+        } else {
+          const auto& xinfo = lcr->local_xlayer_info();
+          if (xinfo.embedded_layer_info_present) {
+            for (const auto& el : xinfo.embedded_layers) {
+              active_layers.insert({xid, static_cast<uint8_t>(el.mlayer_id)});
+            }
+          } else {
+            active_layers.insert({xid, 0});
+          }
+        }
+      }
+    } else if (frame_header_of(obu.get()) != nullptr && xid != GLOBAL_XLAYER_ID) {
+      active_layers.insert({xid, mid});
+    }
+  }
+  return std::vector<std::pair<uint8_t, uint8_t>>(active_layers.begin(), active_layers.end());
+}
+
+int find_layer_order_index(const std::vector<std::pair<uint8_t, uint8_t>>& ordered_layers,
+                           uint8_t xlayer_id, uint8_t mlayer_id) {
+  for (size_t i = 0; i < ordered_layers.size(); ++i) {
+    if (ordered_layers[i].first == xlayer_id && ordered_layers[i].second == mlayer_id) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
+uint64_t compute_layer_bitset(const std::vector<std::pair<uint8_t, uint8_t>>& ordered_layers,
+                              const std::vector<std::pair<uint8_t, uint8_t>>& selected_layers) {
+  uint64_t mask = 0;
+  for (const auto& [xid, mid] : selected_layers) {
+    int idx = find_layer_order_index(ordered_layers, xid, mid);
+    if (idx >= 0 && idx < 64) {
+      mask |= (1ULL << idx);
+    }
+  }
+  return mask;
+}
+
+bool make_reconstruction_point_id(uint8_t obu_xlayer_id, uint8_t ops_id, uint8_t op_index,
+                                  uint16_t& out_id) {
+  if (obu_xlayer_id > 31 || ops_id > 15 || op_index >= 7) {
+    return false;
+  }
+  out_id = static_cast<uint16_t>(((obu_xlayer_id & 0x1F) << 7) | ((ops_id & 0x0F) << 3) |
+                                 (op_index & 0x07));
+  return true;
+}
+
+bool parse_reconstruction_point_id(uint16_t id, uint8_t& out_obu_xlayer_id, uint8_t& out_ops_id,
+                                   uint8_t& out_op_index) {
+  if (id > 0x0FFF) return false;
+  uint8_t op_idx = static_cast<uint8_t>(id & 0x07);
+  if (op_idx == 7) return false;  // 3 LSBs shall not be all ones (ops_cnt <= 7 -> op_index in 0..6)
+  out_obu_xlayer_id = static_cast<uint8_t>((id >> 7) & 0x1F);
+  out_ops_id = static_cast<uint8_t>((id >> 3) & 0x0F);
+  out_op_index = op_idx;
+  return true;
+}
+
 }  // namespace av2_obu

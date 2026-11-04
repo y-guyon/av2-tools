@@ -982,5 +982,30 @@ TEST(AV2ISOBMFFTest, MultiCVSOutOfBandRoundTrip) {
   std::remove(out_obu.c_str());
 }
 
+TEST(AV2ISOBMFFTest, LayerOrderAndReconstructionPointIds) {
+  std::vector<std::pair<uint8_t, uint8_t>> ordered = {{0, 0}, {0, 1}, {2, 0}};
+  EXPECT_EQ(find_layer_order_index(ordered, 0, 0), 0);
+  EXPECT_EQ(find_layer_order_index(ordered, 0, 1), 1);
+  EXPECT_EQ(find_layer_order_index(ordered, 2, 0), 2);
+  EXPECT_EQ(find_layer_order_index(ordered, 1, 0), -1);
+
+  // Bitset for {0, 0} and {2, 0} -> 2^0 + 2^2 = 5
+  EXPECT_EQ(compute_layer_bitset(ordered, {{0, 0}, {2, 0}}), 5u);
+
+  uint16_t rp_id = 0;
+  ASSERT_TRUE(make_reconstruction_point_id(/*obu_xlayer_id=*/31, /*ops_id=*/2, /*op_index=*/0, rp_id));
+  EXPECT_EQ(rp_id, static_cast<uint16_t>((31u << 7) | (2u << 3) | 0u));
+
+  uint8_t xid = 0, ops_id = 0, op_idx = 0;
+  ASSERT_TRUE(parse_reconstruction_point_id(rp_id, xid, ops_id, op_idx));
+  EXPECT_EQ(xid, 31u);
+  EXPECT_EQ(ops_id, 2u);
+  EXPECT_EQ(op_idx, 0u);
+
+  // op_index == 7 (3 LSBs all ones) is invalid because ops_cnt <= 7 -> op_index in 0..6
+  EXPECT_FALSE(make_reconstruction_point_id(0, 0, 7, rp_id));
+  EXPECT_FALSE(parse_reconstruction_point_id(0x0007, xid, ops_id, op_idx));
+}
+
 }  // namespace
 }  // namespace av2_obu
