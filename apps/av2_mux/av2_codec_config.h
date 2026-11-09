@@ -118,7 +118,10 @@ struct PixiBox {
   // Serializes FullBox payload starting with version (1 byte) + flags (3 bytes).
   std::vector<uint8_t> serialize_payload() const;
   static bool parse_payload(const uint8_t* data, size_t size, PixiBox& out);
-  static PixiBox from_parser(const OBUParser& parser);
+  // Builds a 'pixi' box for the given extended layer (defaulting to xlayer_id 0,
+  // which is described by the direct sample entry child 'pixi' box per av2-isobmff
+  // #av2-sample-entry and #channels).
+  static PixiBox from_parser(const OBUParser& parser, uint8_t target_xlayer_id = 0);
 };
 
 // Builds the RFC 6381 Codecs parameter string per av2-isobmff #codecsparam.

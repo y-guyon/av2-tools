@@ -128,15 +128,19 @@ bool Av2Muxer::setup_video_track(const OBUParser& parser) {
     return false;
   }
 
-  // Per av2-isobmff #av2-sample-entry: An AV2SampleEntry SHALL contain at least one 'pixi' box
-  // with the least significant bit of 'px_flags' enabled.
-  const PixiBox pixi = PixiBox::from_parser(parser);
+  // Per av2-isobmff #av2-sample-entry: Unless explicitly stated otherwise in the definition of a
+  // box, the direct child boxes of an AV2SampleEntry describe extended layer 0 (obu_xlayer_id = 0).
+  // An AV2SampleEntry SHALL contain exactly one direct sample entry child 'pixi' box with the
+  // least significant bit of 'px_flags' enabled.
+  const PixiBox pixi = PixiBox::from_parser(parser, /*target_xlayer_id=*/0);
 
-  // Extract optional aspect ratio ('pasp') from ContentInterpretationOBU (replacing forbidden CI OBU).
+  // Extract optional aspect ratio ('pasp') from extended layer 0's ContentInterpretationOBU
+  // (replacing forbidden CI OBU).
   uint32_t pasp_h = 0;
   uint32_t pasp_v = 0;
   for (const auto& obu_ptr : parser.obus()) {
     if (obu_ptr->type() != OBUType::CONTENT_INTERPRETATION) continue;
+    if (obu_ptr->header().get_xlayer_id() != 0) continue;
     const auto* ci = dynamic_cast<const ContentInterpretationOBU*>(obu_ptr.get());
     if (!ci || !ci->has_aspect_ratio_info()) continue;
     if (ci->aspect_ratio_idc() == 255) {
@@ -176,7 +180,8 @@ bool Av2Muxer::setup_video_track(const OBUParser& parser) {
     writer_.set_samples_per_chunk(strategy_.samples_per_chunk);
 
     std::optional<ColrInfo> extracted_colr =
-        strategy_.colr_override ? strategy_.colr_override : extract_colr_info(parser);
+        strategy_.colr_override ? strategy_.colr_override
+                                : extract_colr_info(parser, /*target_xlayer_id=*/0);
     ColrInfo colr = extracted_colr.value_or(ColrInfo{2, 2, 2, 0});
     if (!writer_.add_colr_nclx(colr, 1)) return false;
     if (!writer_.add_pixi(pixi, 1)) return false;
@@ -196,12 +201,17 @@ bool Av2Muxer::setup_video_track(const OBUParser& parser) {
 
     OutOfBandAV2CodecConfigurationBox av2c(input_ifs_);
     const SequenceHeaderOBU* sh = nullptr;
+    const SequenceHeaderOBU* fallback_sh = nullptr;
     size_t config_count = 0;
 
     for (const BaseOBU* p : tus[i]) {
       if (!is_config_obu_instance(*p)) continue;
-      if (p->type() == OBUType::SEQUENCE_HEADER && !sh) {
-        sh = dynamic_cast<const SequenceHeaderOBU*>(p);
+      if (p->type() == OBUType::SEQUENCE_HEADER) {
+        if (p->header().get_xlayer_id() == 0 && !sh) {
+          sh = dynamic_cast<const SequenceHeaderOBU*>(p);
+        } else if (!fallback_sh) {
+          fallback_sh = dynamic_cast<const SequenceHeaderOBU*>(p);
+        }
       }
       ++config_count;
       if (!av2c.append_config_obu(*p)) {
@@ -210,6 +220,7 @@ bool Av2Muxer::setup_video_track(const OBUParser& parser) {
         return false;
       }
     }
+    if (!sh) sh = fallback_sh;
 
     if (!sh) {
       MUX_ERROR("Sync sample TU {} has no Sequence Header OBU", i);
@@ -225,11 +236,13 @@ bool Av2Muxer::setup_video_track(const OBUParser& parser) {
     }
     last_config_bytes = config_bytes;
 
-    // Per av2-isobmff #av2-sample-entry: An AV2SampleEntry SHALL contain at least one 'colr' box
-    // with the 'nclx' colour_type. Fall back to CICP 2/2/2/0 when no CICP is present.
+    // Per av2-isobmff #av2-sample-entry: An AV2SampleEntry SHALL contain exactly one direct sample
+    // entry child 'colr' box with the 'nclx' colour_type describing extended layer 0. Fall back to
+    // CICP 2/2/2/0 when no CICP is present.
     std::optional<ColrInfo> extracted_colr =
-        strategy_.colr_override ? strategy_.colr_override : extract_colr_info_from_tu(tus[i]);
-    if (!extracted_colr) extracted_colr = extract_colr_info(parser);
+        strategy_.colr_override ? strategy_.colr_override
+                                : extract_colr_info_from_tu(tus[i], /*target_xlayer_id=*/0);
+    if (!extracted_colr) extracted_colr = extract_colr_info(parser, /*target_xlayer_id=*/0);
     ColrInfo colr = extracted_colr.value_or(ColrInfo{2, 2, 2, 0});
 
     uint32_t w_full = static_cast<uint32_t>(sequence_header.max_frame_width_minus_1) + 1;
@@ -390,12 +403,16 @@ bool Av2Muxer::assemble_sample_bytes(const TemporalUnit& tu, std::vector<uint8_t
 }
 
 const SequenceHeaderOBU* Av2Muxer::find_first_sequence_header(const OBUParser& parser) {
+  const SequenceHeaderOBU* fallback = nullptr;
   for (const auto& obu : parser.obus()) {
     if (obu->type() == OBUType::SEQUENCE_HEADER) {
-      if (auto* sh = dynamic_cast<const SequenceHeaderOBU*>(obu.get())) return sh;
+      if (auto* sh = dynamic_cast<const SequenceHeaderOBU*>(obu.get())) {
+        if (obu->header().get_xlayer_id() == 0) return sh;
+        if (!fallback) fallback = sh;
+      }
     }
   }
-  return nullptr;
+  return fallback;
 }
 
 const SequenceHeaderOBU* Av2Muxer::find_sh_in_tu(const TemporalUnit& tu, uint32_t xlayer_id) {

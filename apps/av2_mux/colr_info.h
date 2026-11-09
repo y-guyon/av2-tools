@@ -28,13 +28,15 @@ struct ColrInfo {
   uint32_t full_range_flag;  // 0 or 1
 };
 
-// Search order: CI OBU > LCR (lowest xlayer with color info) > OPS.
-// Returns nullopt if no source carries color metadata.
-std::optional<ColrInfo> extract_colr_info(const OBUParser& parser);
+// Search order for the given extended layer (defaulting to xlayer_id 0 per av2-isobmff
+// #av2-sample-entry): CI OBU > LCR > OPS.
+// Returns nullopt if no source carries color metadata for target_xlayer_id.
+std::optional<ColrInfo> extract_colr_info(const OBUParser& parser, uint32_t target_xlayer_id = 0);
 
 // Same search order as extract_colr_info(), scoped to a single TU's OBUs.
 // Used to pick colr for a new sample entry created at a CVS boundary.
-std::optional<ColrInfo> extract_colr_info_from_tu(const TemporalUnit& tu);
+std::optional<ColrInfo> extract_colr_info_from_tu(const TemporalUnit& tu,
+                                                  uint32_t target_xlayer_id = 0);
 
 // Resolves a CICP profile name (e.g. "bt709") to its ColrInfo. nullopt for unknown names
 std::optional<ColrInfo> colr_profile_by_name(const std::string& name);

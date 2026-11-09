@@ -274,8 +274,9 @@ std::vector<uint8_t> make_ci_obu(uint8_t xlayer_id = 0, uint8_t cp = 1, uint8_t 
   return wrap_annexb_obu(OBUType::CONTENT_INTERPRETATION, bw.bytes(), 0, 0, xlayer_id);
 }
 
-std::vector<uint8_t> make_local_lcr_obu(uint8_t xlayer_id, uint32_t layer_type,
-                                        uint32_t aux_type = 0) {
+std::vector<uint8_t> make_local_lcr_multi_mlayer_obu(
+    uint8_t xlayer_id,
+    const std::vector<std::tuple<uint8_t, uint32_t, uint32_t>>& mlayers) {
   BitstreamWriter bw;
   bw.write_bits(0, 3);  // lcr_global_id
   bw.write_bits(0, 3);  // lcr_local_id
@@ -291,19 +292,35 @@ std::vector<uint8_t> make_local_lcr_obu(uint8_t xlayer_id, uint32_t layer_type,
   bw.write_bit(1);  // embedded_layer_info_present
   bw.byte_align();
 
-  // lcr_embedded_layer_info: mlayer_map = 0x01 (mlayer 0 present)
-  bw.write_bits(0x01, 8);
-  bw.write_bits(0x01, MAX_NUM_TLAYERS);  // tlayer_map
-  bw.write_bits(layer_type, 8);          // layer_type (0=TEXTURE_LAYER, 1=AUX_LAYER)
-  if (layer_type == AUX_LAYER) {
-    bw.write_bits(aux_type, 8);          // auxiliary_type
+  uint32_t mlayer_map = 0;
+  for (const auto& [mid, ltype, atype] : mlayers) {
+    (void)ltype;
+    (void)atype;
+    mlayer_map |= (1u << mid);
   }
-  bw.write_bits(VIEW_UNSPECIFIED, 8);    // view_type
-  bw.write_bit(1);                       // same_sh_max_resolution = 1
-  bw.byte_align();
+  bw.write_bits(mlayer_map, 8);
+
+  for (const auto& [mid, ltype, atype] : mlayers) {
+    bw.write_bits(0x01, MAX_NUM_TLAYERS);  // tlayer_map
+    bw.write_bits(ltype, 8);               // layer_type (0=TEXTURE_LAYER, 1=AUX_LAYER)
+    if (ltype == AUX_LAYER) {
+      bw.write_bits(atype, 8);             // auxiliary_type
+    }
+    bw.write_bits(VIEW_UNSPECIFIED, 8);    // view_type
+    if (mid > 0) {
+      bw.write_bits(0, mid);               // dependent_layer_map
+    }
+    bw.write_bit(1);                       // same_sh_max_resolution = 1
+    bw.byte_align();
+  }
 
   append_extensible_trailing_bits(bw);
   return wrap_annexb_obu(OBUType::LAYER_CONFIGURATION_RECORD, bw.bytes(), 0, 0, xlayer_id, true);
+}
+
+std::vector<uint8_t> make_local_lcr_obu(uint8_t xlayer_id, uint32_t layer_type,
+                                        uint32_t aux_type = 0) {
+  return make_local_lcr_multi_mlayer_obu(xlayer_id, {{0, layer_type, aux_type}});
 }
 
 std::vector<uint8_t> make_msdo_obu(uint32_t num_streams = 2, uint32_t profile_idc = 3,
@@ -631,8 +648,12 @@ TEST(AV2ISOBMFFTest, InBandAV2CodecConfigurationBoxSerializeAndParse) {
 // ============================================================================
 
 TEST(AV2ISOBMFFTest, PixiBoxAndCodecsStringDerivation) {
-  // Stream with xlayer 0 = YUV 4:2:0 10-bit texture (CSP_TOPLEFT=2),
-  // xlayer 1 = 4:0:0 8-bit alpha auxiliary layer
+  // Stream with:
+  //   xlayer 0: YUV 4:2:0 10-bit (CSP_TOPLEFT=2, CICP 9/16/9/0) with two embedded layers:
+  //             mlayer 0 = TEXTURE_LAYER, mlayer 1 = AUX_LAYER (ALPHA_AUX)
+  //   xlayer 1: 4:0:0 8-bit segmentation auxiliary layer (CICP 6/6/6/1)
+  // Per av2-isobmff #av2-sample-entry and #channels (PR #121), the direct sample entry child
+  // 'pixi' and 'colr' boxes describe extended layer 0 only.
   std::vector<uint8_t> stream;
   auto append = [&](const std::vector<uint8_t>& b) {
     stream.insert(stream.end(), b.begin(), b.end());
@@ -640,12 +661,14 @@ TEST(AV2ISOBMFFTest, PixiBoxAndCodecsStringDerivation) {
   append(make_td_obu());
   append(make_seq_header_obu(/*xlayer_id=*/0, /*profile_idc=*/0, /*level_idx=*/4, /*tier=*/0,
                              CHROMA_FORMAT_420, /*bit_depth_idc=*/0));  // 10-bit 4:2:0
-  append(make_local_lcr_obu(/*xlayer_id=*/0, TEXTURE_LAYER));
+  append(make_local_lcr_multi_mlayer_obu(
+      /*xlayer_id=*/0, {{0, TEXTURE_LAYER, 0}, {1, AUX_LAYER, ALPHA_AUX}}));
   append(make_ci_obu(/*xlayer_id=*/0, /*cp=*/9, /*tc=*/16, /*mc=*/9, /*full_range=*/false,
                      /*has_csp=*/true, CSP_TOPLEFT));
   append(make_seq_header_obu(/*xlayer_id=*/1, /*profile_idc=*/0, /*level_idx=*/4, /*tier=*/0,
-                             CHROMA_FORMAT_400, /*bit_depth_idc=*/1));  // 8-bit monochrome alpha
-  append(make_local_lcr_obu(/*xlayer_id=*/1, AUX_LAYER, ALPHA_AUX));
+                             CHROMA_FORMAT_400, /*bit_depth_idc=*/1));  // 8-bit monochrome
+  append(make_local_lcr_obu(/*xlayer_id=*/1, AUX_LAYER, SEGMENTATION_AUX));
+  append(make_ci_obu(/*xlayer_id=*/1, /*cp=*/6, /*tc=*/6, /*mc=*/6, /*full_range=*/true));
   append(make_clk_obu(0, 0));
   append(make_clk_obu(1, 0));
 
@@ -657,14 +680,15 @@ TEST(AV2ISOBMFFTest, PixiBoxAndCodecsStringDerivation) {
   PixiBox pixi = PixiBox::from_parser(parser);
   EXPECT_EQ(pixi.version, 0u);
   EXPECT_EQ(pixi.flags, 1u);
-  ASSERT_EQ(pixi.channels.size(), 4u);
+  // xlayer 0 has mlayer 0 (3 texture channels: 2, 3, 4) + mlayer 1 (alpha + 2 unused planes: 5, 0, 0)
+  ASSERT_EQ(pixi.channels.size(), 6u);
 
-  // Y channel
+  // Y channel (mlayer 0, plane 0)
   EXPECT_EQ(pixi.channels[0].bits_per_channel, 10u);
   EXPECT_EQ(pixi.channels[0].channel_idc, 2u);
   EXPECT_FALSE(pixi.channels[0].subsampling_flag);
 
-  // U, V channels (4:2:0 -> subsampling_type = 2, CSP_TOPLEFT -> subsampling_location = 2)
+  // U, V channels (mlayer 0, planes 1..2: 4:2:0 -> subsampling_type = 2, CSP_TOPLEFT -> subsampling_location = 2)
   for (size_t i : {1u, 2u}) {
     EXPECT_EQ(pixi.channels[i].bits_per_channel, 10u);
     EXPECT_EQ(pixi.channels[i].channel_idc, i + 2);
@@ -673,27 +697,43 @@ TEST(AV2ISOBMFFTest, PixiBoxAndCodecsStringDerivation) {
     EXPECT_EQ(pixi.channels[i].subsampling_location, 2u);
   }
 
-  // Alpha channel
-  EXPECT_EQ(pixi.channels[3].bits_per_channel, 8u);
+  // Alpha channel (mlayer 1, plane 0) + 2 unused chroma planes (mlayer 1, planes 1..2)
+  EXPECT_EQ(pixi.channels[3].bits_per_channel, 10u);
   EXPECT_EQ(pixi.channels[3].channel_idc, 5u);
   EXPECT_FALSE(pixi.channels[3].subsampling_flag);
+  for (size_t i : {4u, 5u}) {
+    EXPECT_EQ(pixi.channels[i].bits_per_channel, 10u);
+    EXPECT_EQ(pixi.channels[i].channel_idc, 0u);
+    EXPECT_FALSE(pixi.channels[i].subsampling_flag);
+  }
 
   // Round-trip serialize/parse PixiBox (including unrecognized trailing bytes per ISOBMFF)
   auto pixi_bytes = pixi.serialize_payload();
   PixiBox parsed_pixi;
   ASSERT_TRUE(PixiBox::parse_payload(pixi_bytes.data(), pixi_bytes.size(), parsed_pixi));
-  ASSERT_EQ(parsed_pixi.channels.size(), 4u);
+  ASSERT_EQ(parsed_pixi.channels.size(), 6u);
   EXPECT_EQ(parsed_pixi.channels[3].channel_idc, 5u);
   auto pixi_with_trailing = pixi_bytes;
   pixi_with_trailing.push_back(0xAA);
   PixiBox parsed_pixi_trailing;
   ASSERT_TRUE(PixiBox::parse_payload(pixi_with_trailing.data(), pixi_with_trailing.size(),
                                      parsed_pixi_trailing));
-  EXPECT_EQ(parsed_pixi_trailing.channels.size(), 4u);
+  EXPECT_EQ(parsed_pixi_trailing.channels.size(), 6u);
 
-  // Codecs string matches av2-isobmff #codecsparam example (with av2E 4CC)
+  // Direct sample entry 'colr' describes xlayer 0 (9/16/9/0), not xlayer 1 (6/6/6/1)
   auto colr_opt = extract_colr_info(parser);
   ASSERT_TRUE(colr_opt.has_value());
+  EXPECT_EQ(colr_opt->colour_primaries, 9u);
+  EXPECT_EQ(colr_opt->transfer_characteristics, 16u);
+  EXPECT_EQ(colr_opt->matrix_coefficients, 9u);
+  EXPECT_EQ(colr_opt->full_range_flag, 0u);
+
+  auto colr_x1 = extract_colr_info(parser, /*target_xlayer_id=*/1);
+  ASSERT_TRUE(colr_x1.has_value());
+  EXPECT_EQ(colr_x1->colour_primaries, 6u);
+  EXPECT_EQ(colr_x1->full_range_flag, 1u);
+
+  // Codecs string matches av2-isobmff #codecsparam example (with av2E 4CC)
   const auto* first_sh = dynamic_cast<const SequenceHeaderOBU*>(parser.obus()[1].get());
   ASSERT_NE(first_sh, nullptr);
   std::string codecs = build_codecs_string("av2E", first_sh->sequence_header(), pixi, *colr_opt);
@@ -701,8 +741,7 @@ TEST(AV2ISOBMFFTest, PixiBoxAndCodecsStringDerivation) {
 
   // Default suffix ".3.22.01.01.01.0" should be omitted
   PixiBox default_pixi;
-  default_pixi.channels = pixi.channels;
-  default_pixi.channels.pop_back();  // Remove alpha -> 3 channels
+  default_pixi.channels.assign(pixi.channels.begin(), pixi.channels.begin() + 3);
   ColrInfo default_colr{1, 1, 1, 0};
   std::string short_codecs =
       build_codecs_string("av2E", first_sh->sequence_header(), default_pixi, default_colr);
@@ -862,33 +901,76 @@ TEST(AV2ISOBMFFTest, Chroma422And444AndDepthGainMapPixi) {
   OBUParser parser;
   ASSERT_TRUE(parser.parse_file(fname));
 
-  PixiBox pixi = PixiBox::from_parser(parser);
-  ASSERT_EQ(pixi.channels.size(), 7u);
+  // Direct sample entry 'pixi' (default target_xlayer_id = 0) describes xlayer 0 only
+  PixiBox pixi0 = PixiBox::from_parser(parser);
+  ASSERT_EQ(pixi0.channels.size(), 3u);
   // xlayer 0: 12-bit 4:2:2 texture -> channel_idc 2, 3 (subsampling_type=1), 4 (subsampling_type=1)
-  EXPECT_EQ(pixi.channels[0].bits_per_channel, 12u);
-  EXPECT_EQ(pixi.channels[0].channel_idc, 2u);
-  EXPECT_FALSE(pixi.channels[0].subsampling_flag);
-  EXPECT_EQ(pixi.channels[1].channel_idc, 3u);
-  EXPECT_TRUE(pixi.channels[1].subsampling_flag);
-  EXPECT_EQ(pixi.channels[1].subsampling_type, 1u);  // 4:2:2
-  EXPECT_EQ(pixi.channels[2].channel_idc, 4u);
-  EXPECT_TRUE(pixi.channels[2].subsampling_flag);
-  EXPECT_EQ(pixi.channels[2].subsampling_type, 1u);
+  EXPECT_EQ(pixi0.channels[0].bits_per_channel, 12u);
+  EXPECT_EQ(pixi0.channels[0].channel_idc, 2u);
+  EXPECT_FALSE(pixi0.channels[0].subsampling_flag);
+  EXPECT_EQ(pixi0.channels[1].channel_idc, 3u);
+  EXPECT_TRUE(pixi0.channels[1].subsampling_flag);
+  EXPECT_EQ(pixi0.channels[1].subsampling_type, 1u);  // 4:2:2
+  EXPECT_EQ(pixi0.channels[2].channel_idc, 4u);
+  EXPECT_TRUE(pixi0.channels[2].subsampling_flag);
+  EXPECT_EQ(pixi0.channels[2].subsampling_type, 1u);
 
   // xlayer 1: 10-bit 4:4:4 gain map -> 3 channels with channel_idc = 1 (Unspecified);
   // per ISOBMFF 9th Ed. §12.1.11.2, subsampling fields are only present when channel_idc > 1.
-  for (size_t i : {3u, 4u, 5u}) {
-    EXPECT_EQ(pixi.channels[i].bits_per_channel, 10u);
-    EXPECT_EQ(pixi.channels[i].channel_idc, 1u);
-    EXPECT_FALSE(pixi.channels[i].subsampling_flag);
+  PixiBox pixi1 = PixiBox::from_parser(parser, /*target_xlayer_id=*/1);
+  ASSERT_EQ(pixi1.channels.size(), 3u);
+  for (size_t i : {0u, 1u, 2u}) {
+    EXPECT_EQ(pixi1.channels[i].bits_per_channel, 10u);
+    EXPECT_EQ(pixi1.channels[i].channel_idc, 1u);
+    EXPECT_FALSE(pixi1.channels[i].subsampling_flag);
   }
 
   // xlayer 2: 8-bit 4:0:0 depth -> channel_idc = 6 (Depth)
-  EXPECT_EQ(pixi.channels[6].bits_per_channel, 8u);
-  EXPECT_EQ(pixi.channels[6].channel_idc, 6u);
-  EXPECT_FALSE(pixi.channels[6].subsampling_flag);
+  PixiBox pixi2 = PixiBox::from_parser(parser, /*target_xlayer_id=*/2);
+  ASSERT_EQ(pixi2.channels.size(), 1u);
+  EXPECT_EQ(pixi2.channels[0].bits_per_channel, 8u);
+  EXPECT_EQ(pixi2.channels[0].channel_idc, 6u);
+  EXPECT_FALSE(pixi2.channels[0].subsampling_flag);
 
   std::remove(fname.c_str());
+
+  // Also test the #sample-channel-complex-example from av2-isobmff PR #121:
+  //   xlayer 0 (CHROMA_FORMAT_400, 8-bit): mlayer 0..3 TEXTURE_LAYER (CMYK -> 2, 3, 4, 7),
+  //                                        mlayer 4 AUX_LAYER ALPHA_AUX (-> 5)
+  //   xlayer 1 (CHROMA_FORMAT_400, 8-bit): mlayer 0 SEGMENTATION_AUX, mlayer 1 GAIN_MAP_AUX
+  std::vector<uint8_t> cmyka_stream;
+  auto append_cmyka = [&](const std::vector<uint8_t>& b) {
+    cmyka_stream.insert(cmyka_stream.end(), b.begin(), b.end());
+  };
+  append_cmyka(make_td_obu());
+  append_cmyka(
+      make_seq_header_obu(/*xlayer_id=*/0, 0, 4, 0, CHROMA_FORMAT_400, /*bit_depth_idc=*/1));
+  append_cmyka(make_local_lcr_multi_mlayer_obu(/*xlayer_id=*/0, {{0, TEXTURE_LAYER, 0},
+                                                                 {1, TEXTURE_LAYER, 0},
+                                                                 {2, TEXTURE_LAYER, 0},
+                                                                 {3, TEXTURE_LAYER, 0},
+                                                                 {4, AUX_LAYER, ALPHA_AUX}}));
+  append_cmyka(
+      make_seq_header_obu(/*xlayer_id=*/1, 0, 4, 0, CHROMA_FORMAT_400, /*bit_depth_idc=*/1));
+  append_cmyka(make_local_lcr_multi_mlayer_obu(
+      /*xlayer_id=*/1, {{0, AUX_LAYER, SEGMENTATION_AUX}, {1, AUX_LAYER, GAIN_MAP_AUX}}));
+  append_cmyka(make_clk_obu(0, 0));
+  append_cmyka(make_clk_obu(1, 0));
+
+  const std::string cmyka_fname = "test_pixi_cmyka.obu";
+  write_bytes_to_file(cmyka_fname, cmyka_stream);
+  OBUParser cmyka_parser;
+  ASSERT_TRUE(cmyka_parser.parse_file(cmyka_fname));
+
+  PixiBox cmyka_pixi = PixiBox::from_parser(cmyka_parser);
+  ASSERT_EQ(cmyka_pixi.channels.size(), 5u);
+  EXPECT_EQ(cmyka_pixi.channels[0].channel_idc, 2u);
+  EXPECT_EQ(cmyka_pixi.channels[1].channel_idc, 3u);
+  EXPECT_EQ(cmyka_pixi.channels[2].channel_idc, 4u);
+  EXPECT_EQ(cmyka_pixi.channels[3].channel_idc, 7u);
+  EXPECT_EQ(cmyka_pixi.channels[4].channel_idc, 5u);
+
+  std::remove(cmyka_fname.c_str());
 }
 
 TEST(AV2ISOBMFFTest, SyncSampleStssAndDefaultColrFallback) {

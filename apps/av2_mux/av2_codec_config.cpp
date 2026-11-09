@@ -494,7 +494,7 @@ bool PixiBox::parse_payload(const uint8_t* data, size_t size, PixiBox& out) {
   return offset <= size;
 }
 
-PixiBox PixiBox::from_parser(const OBUParser& parser) {
+PixiBox PixiBox::from_parser(const OBUParser& parser, uint8_t target_xlayer_id) {
   PixiBox pixi;
   pixi.version = 0;
   pixi.flags = 1;
@@ -503,11 +503,12 @@ PixiBox PixiBox::from_parser(const OBUParser& parser) {
   std::map<uint8_t, const AV2SequenceHeader*> sh_by_xlayer;
   // Map xlayer_id -> ContentInterpretationOBU
   std::map<uint8_t, const ContentInterpretationOBU*> ci_by_xlayer;
-  // Set of active (xlayer_id, mlayer_id) pairs
-  std::set<std::pair<uint8_t, uint8_t>> active_layers;
+  // Set of active mlayer_id values within target_xlayer_id (iterated in increasing mlayer_id order
+  // per av2-isobmff #channels).
+  std::set<uint8_t> active_mlayers;
 
-  // Map (xlayer_id, mlayer_id) -> (layer_type, auxiliary_type)
-  std::map<std::pair<uint8_t, uint8_t>, std::pair<uint32_t, uint32_t>> layer_roles;
+  // Map mlayer_id (within target_xlayer_id) -> (layer_type, auxiliary_type)
+  std::map<uint8_t, std::pair<uint32_t, uint32_t>> layer_roles;
 
   for (const auto& obu : parser.obus()) {
     const uint8_t xid = obu->header().get_xlayer_id();
@@ -517,7 +518,9 @@ PixiBox PixiBox::from_parser(const OBUParser& parser) {
         if (sh_by_xlayer.find(xid) == sh_by_xlayer.end()) {
           sh_by_xlayer[xid] = &sh->sequence_header();
         }
-        active_layers.insert({xid, 0});
+        if (xid == target_xlayer_id) {
+          active_mlayers.insert(0);
+        }
       }
     } else if (obu->type() == OBUType::CONTENT_INTERPRETATION) {
       if (const auto* ci = dynamic_cast<const ContentInterpretationOBU*>(obu.get())) {
@@ -530,26 +533,27 @@ PixiBox PixiBox::from_parser(const OBUParser& parser) {
         if (lcr->is_global()) {
           for (const auto& gp : lcr->global_payloads()) {
             const uint8_t gp_xid = static_cast<uint8_t>(gp.xlayer_id);
+            if (gp_xid != target_xlayer_id) continue;
             if (gp.xlayer_info.embedded_layer_info_present) {
               for (const auto& el : gp.xlayer_info.embedded_layers) {
                 const uint8_t el_mid = static_cast<uint8_t>(el.mlayer_id);
-                active_layers.insert({gp_xid, el_mid});
-                layer_roles[{gp_xid, el_mid}] = {el.layer_type, el.auxiliary_type};
+                active_mlayers.insert(el_mid);
+                layer_roles[el_mid] = {el.layer_type, el.auxiliary_type};
               }
             } else {
-              active_layers.insert({gp_xid, 0});
+              active_mlayers.insert(0);
             }
           }
-        } else {
+        } else if (xid == target_xlayer_id) {
           const auto& xinfo = lcr->local_xlayer_info();
           if (xinfo.embedded_layer_info_present) {
             for (const auto& el : xinfo.embedded_layers) {
               const uint8_t el_mid = static_cast<uint8_t>(el.mlayer_id);
-              active_layers.insert({xid, el_mid});
-              layer_roles[{xid, el_mid}] = {el.layer_type, el.auxiliary_type};
+              active_mlayers.insert(el_mid);
+              layer_roles[el_mid] = {el.layer_type, el.auxiliary_type};
             }
           } else {
-            active_layers.insert({xid, 0});
+            active_mlayers.insert(0);
           }
         }
       }
@@ -558,58 +562,59 @@ PixiBox PixiBox::from_parser(const OBUParser& parser) {
         if (atlas->mode_idc() == AtlasSegmentOBU::ModeIdc::MULTISTREAM_ALPHA_ATLAS &&
             atlas->msi_alpha_segments_present()) {
           for (const auto& seg : atlas->segments()) {
-            if (seg.alpha_segment_flag) {
-              uint8_t seg_xid = static_cast<uint8_t>(seg.input_stream_id);
-              if (layer_roles.find({seg_xid, 0}) == layer_roles.end()) {
-                layer_roles[{seg_xid, 0}] = {AUX_LAYER, ALPHA_AUX};
+            if (seg.alpha_segment_flag &&
+                static_cast<uint8_t>(seg.input_stream_id) == target_xlayer_id) {
+              if (layer_roles.find(0) == layer_roles.end()) {
+                layer_roles[0] = {AUX_LAYER, ALPHA_AUX};
               }
             }
           }
         }
       }
-    } else if (frame_header_of(obu.get()) != nullptr && xid != GLOBAL_XLAYER_ID) {
-      active_layers.insert({xid, mid});
+    } else if (frame_header_of(obu.get()) != nullptr && xid == target_xlayer_id) {
+      active_mlayers.insert(mid);
     }
   }
 
-  const AV2SequenceHeader* fallback_sh =
-      sh_by_xlayer.empty() ? nullptr : sh_by_xlayer.begin()->second;
-  if (active_layers.empty() && fallback_sh != nullptr) {
-    active_layers.insert({0, 0});
+  const AV2SequenceHeader* sh = nullptr;
+  if (auto it = sh_by_xlayer.find(target_xlayer_id); it != sh_by_xlayer.end()) {
+    sh = it->second;
+  } else if (target_xlayer_id == 0 && !sh_by_xlayer.empty()) {
+    sh = sh_by_xlayer.begin()->second;
+  }
+  if (!sh) {
+    return pixi;
+  }
+  if (active_mlayers.empty()) {
+    active_mlayers.insert(0);
   }
 
   // Track used colour channel_idc values for monochrome multi-layer (e.g., CMYK: 2, 3, 4, 7).
   const uint8_t kMonoColourIdcs[4] = {2, 3, 4, 7};
   size_t mono_colour_idx = 0;
 
-  for (const auto& [xid, mid] : active_layers) {
-    const AV2SequenceHeader* sh = fallback_sh;
-    if (auto it = sh_by_xlayer.find(xid); it != sh_by_xlayer.end()) {
-      sh = it->second;
+  const uint8_t bit_depth = static_cast<uint8_t>(sh->BitDepth);
+  const uint64_t cf = sh->chroma_format_idc;  // 0=4:2:0, 1=4:0:0, 2=4:4:4, 3=4:2:2
+
+  uint8_t sub_type = 2;  // 4:2:0 (CHROMA_FORMAT_420)
+  if (cf == CHROMA_FORMAT_444) {
+    sub_type = 0;  // 4:4:4
+  } else if (cf == CHROMA_FORMAT_422) {
+    sub_type = 1;  // 4:2:2
+  }
+
+  uint8_t sub_loc = 0;
+  if (auto ci_it = ci_by_xlayer.find(target_xlayer_id); ci_it != ci_by_xlayer.end()) {
+    const ContentInterpretationOBU* ci = ci_it->second;
+    if (ci->has_chroma_sample_position() && ci->chroma_sample_position_top() <= 5) {
+      sub_loc = static_cast<uint8_t>(ci->chroma_sample_position_top());
     }
-    if (!sh) continue;
+  }
 
-    const uint8_t bit_depth = static_cast<uint8_t>(sh->BitDepth);
-    const uint64_t cf = sh->chroma_format_idc;  // 0=4:2:0, 1=4:0:0, 2=4:4:4, 3=4:2:2
-
-    uint8_t sub_type = 2;  // 4:2:0 (CHROMA_FORMAT_420)
-    if (cf == CHROMA_FORMAT_444) {
-      sub_type = 0;  // 4:4:4
-    } else if (cf == CHROMA_FORMAT_422) {
-      sub_type = 1;  // 4:2:2
-    }
-
-    uint8_t sub_loc = 0;
-    if (auto ci_it = ci_by_xlayer.find(xid); ci_it != ci_by_xlayer.end()) {
-      const ContentInterpretationOBU* ci = ci_it->second;
-      if (ci->has_chroma_sample_position() && ci->chroma_sample_position_top() <= 5) {
-        sub_loc = static_cast<uint8_t>(ci->chroma_sample_position_top());
-      }
-    }
-
+  for (const uint8_t mid : active_mlayers) {
     uint32_t layer_type = TEXTURE_LAYER;
     uint32_t aux_type = 0;
-    if (auto r_it = layer_roles.find({xid, mid}); r_it != layer_roles.end()) {
+    if (auto r_it = layer_roles.find(mid); r_it != layer_roles.end()) {
       layer_type = r_it->second.first;
       aux_type = r_it->second.second;
     }
@@ -653,7 +658,7 @@ PixiBox PixiBox::from_parser(const OBUParser& parser) {
         pixi.channels.push_back(c0);
 
         if (cf != 1) {
-          // Chroma planes in a 3-plane extended layer carrying alpha/depth are Unused (0).
+          // Chroma planes in a 3-plane embedded layer carrying alpha/depth are Unused (0).
           for (int p = 1; p < 3; ++p) {
             PixiChannel unused_ch;
             unused_ch.bits_per_channel = bit_depth;
