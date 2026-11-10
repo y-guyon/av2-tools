@@ -81,18 +81,18 @@ inline bool operator!=(const OutOfBandAV2CodecConfigurationBox& a,
 
 // InBandAV2CodecConfigurationBox ('av2c') per av2-isobmff:
 //   aligned(8) class InBandAV2CodecConfigurationBox extends AV2CodecConfigurationBox('av2c') {
-//     unsigned int(3) reserved1 = 0;
 //     unsigned int(2) max_num_streams_minus_1;
 //     unsigned int(5) max_profile_idc;
 //     unsigned int(5) max_level_idx;
 //     unsigned int(1) max_tier;
+//     unsigned int(3) max_bit_depth_idc;
 //   }
 struct InBandAV2CodecConfigurationBox {
-  uint8_t reserved1 = 0;
   uint8_t max_num_streams_minus_1 = 0;
   uint8_t max_profile_idc = 0;
   uint8_t max_level_idx = 0;
   uint8_t max_tier = 0;
+  uint8_t max_bit_depth_idc = 1;  // Default to 8-bit (idc=1) when no SH/LCR is present
 
   std::vector<uint8_t> serialize() const;
   static bool parse(const uint8_t* data, size_t size, InBandAV2CodecConfigurationBox& out);
@@ -122,11 +122,12 @@ struct PixiBox {
 };
 
 // Builds the RFC 6381 Codecs parameter string per av2-isobmff #codecsparam:
-// <sample_entry_4cc>.<max_profile_idc><max_level_idx><max_tier>
+// <sample_entry_4cc>.<max_profile_idc><max_level_idx><max_tier><max_bit_depth_idc>
 std::string build_codecs_string(const std::string& sample_entry_4cc,
                                 uint8_t max_profile_idc,
                                 uint8_t max_level_idx,
-                                uint8_t max_tier);
+                                uint8_t max_tier,
+                                uint8_t max_bit_depth_idc = 1);
 std::string build_codecs_string(const std::string& sample_entry_4cc,
                                 const InBandAV2CodecConfigurationBox& inband);
 std::string build_codecs_string(const std::string& sample_entry_4cc,

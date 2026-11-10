@@ -351,30 +351,51 @@ bool OutOfBandAV2CodecConfigurationBox::parse(const uint8_t* data, size_t size,
 
 // ==================== InBandAV2CodecConfigurationBox ('av2c') ====================
 
+namespace {
+
+uint32_t bit_depth_from_idc(uint8_t idc) {
+  if (idc == 1) return 8;
+  if (idc == 0) return 10;
+  if (idc == 2) return 12;
+  return 12u + idc;
+}
+
+}  // namespace
+
 std::vector<uint8_t> InBandAV2CodecConfigurationBox::serialize() const {
-  uint8_t b0 = static_cast<uint8_t>(((reserved1 & 0x07) << 5) |
-                                    ((max_num_streams_minus_1 & 0x03) << 3) |
-                                    ((max_profile_idc >> 2) & 0x07));
-  uint8_t b1 = static_cast<uint8_t>(((max_profile_idc & 0x03) << 6) |
-                                    ((max_level_idx & 0x1F) << 1) |
-                                    (max_tier & 0x01));
+  uint8_t b0 = static_cast<uint8_t>(((max_num_streams_minus_1 & 0x03) << 6) |
+                                    ((max_profile_idc & 0x1F) << 1) |
+                                    ((max_level_idx >> 4) & 0x01));
+  uint8_t b1 = static_cast<uint8_t>(((max_level_idx & 0x0F) << 4) |
+                                    ((max_tier & 0x01) << 3) |
+                                    (max_bit_depth_idc & 0x07));
   return {b0, b1};
 }
 
 bool InBandAV2CodecConfigurationBox::parse(const uint8_t* data, size_t size,
                                            InBandAV2CodecConfigurationBox& out) {
   if (!data || size < 2) return false;
-  out.reserved1 = (data[0] >> 5) & 0x07;
-  out.max_num_streams_minus_1 = (data[0] >> 3) & 0x03;
-  out.max_profile_idc = static_cast<uint8_t>(((data[0] & 0x07) << 2) | ((data[1] >> 6) & 0x03));
-  out.max_level_idx = (data[1] >> 1) & 0x1F;
-  out.max_tier = data[1] & 0x01;
+  out.max_num_streams_minus_1 = (data[0] >> 6) & 0x03;
+  out.max_profile_idc = (data[0] >> 1) & 0x1F;
+  out.max_level_idx = static_cast<uint8_t>(((data[0] & 0x01) << 4) | ((data[1] >> 4) & 0x0F));
+  out.max_tier = (data[1] >> 3) & 0x01;
+  out.max_bit_depth_idc = data[1] & 0x07;
   return true;
 }
 
 InBandAV2CodecConfigurationBox InBandAV2CodecConfigurationBox::from_parser(
     const OBUParser& parser) {
   InBandAV2CodecConfigurationBox box;
+  bool has_bit_depth = false;
+  auto update_bit_depth_idc = [&](uint8_t idc) {
+    idc &= 0x07;
+    if (!has_bit_depth ||
+        bit_depth_from_idc(idc) > bit_depth_from_idc(box.max_bit_depth_idc)) {
+      box.max_bit_depth_idc = idc;
+      has_bit_depth = true;
+    }
+  };
+
   for (const auto& obu : parser.obus()) {
     if (obu->type() == OBUType::SEQUENCE_HEADER) {
       const auto* sh_obu = dynamic_cast<const SequenceHeaderOBU*>(obu.get());
@@ -385,6 +406,7 @@ InBandAV2CodecConfigurationBox InBandAV2CodecConfigurationBox::from_parser(
       box.max_level_idx =
           std::max<uint8_t>(box.max_level_idx, static_cast<uint8_t>(sh.seq_level_idx));
       box.max_tier = std::max<uint8_t>(box.max_tier, static_cast<uint8_t>(sh.seq_tier));
+      update_bit_depth_idc(static_cast<uint8_t>(sh.bit_depth_idc));
     } else if (obu->type() == OBUType::MSDO) {
       const auto* msdo = dynamic_cast<const MSDOOBU*>(obu.get());
       if (!msdo) continue;
@@ -398,6 +420,21 @@ InBandAV2CodecConfigurationBox InBandAV2CodecConfigurationBox::from_parser(
                                             static_cast<uint8_t>(msdo->multistream_level_idx()));
       box.max_tier =
           std::max<uint8_t>(box.max_tier, static_cast<uint8_t>(msdo->multistream_tier()));
+    } else if (obu->type() == OBUType::LAYER_CONFIGURATION_RECORD) {
+      const auto* lcr = dynamic_cast<const LayerConfigurationRecordOBU*>(obu.get());
+      if (!lcr) continue;
+      if (lcr->is_global()) {
+        for (const auto& gp : lcr->global_payloads()) {
+          if (gp.xlayer_info.rep_info_present && gp.xlayer_info.rep_info.format_info_present) {
+            update_bit_depth_idc(static_cast<uint8_t>(gp.xlayer_info.rep_info.bit_depth_idc));
+          }
+        }
+      } else {
+        const auto& xinfo = lcr->local_xlayer_info();
+        if (xinfo.rep_info_present && xinfo.rep_info.format_info_present) {
+          update_bit_depth_idc(static_cast<uint8_t>(xinfo.rep_info.bit_depth_idc));
+        }
+      }
     }
   }
   return box;
@@ -689,16 +726,18 @@ static char to_base32_char(uint8_t val) {
 std::string build_codecs_string(const std::string& sample_entry_4cc,
                                 uint8_t max_profile_idc,
                                 uint8_t max_level_idx,
-                                uint8_t max_tier) {
+                                uint8_t max_tier,
+                                uint8_t max_bit_depth_idc) {
   const char tier_char = (max_tier == 0) ? 'M' : 'H';
-  return fmt::format("{}.{}{}{}", sample_entry_4cc, to_base32_char(max_profile_idc),
-                     to_base32_char(max_level_idx), tier_char);
+  return fmt::format("{}.{}{}{}{}", sample_entry_4cc, to_base32_char(max_profile_idc),
+                     to_base32_char(max_level_idx), tier_char,
+                     static_cast<unsigned>(max_bit_depth_idc & 0x07));
 }
 
 std::string build_codecs_string(const std::string& sample_entry_4cc,
                                 const InBandAV2CodecConfigurationBox& inband) {
   return build_codecs_string(sample_entry_4cc, inband.max_profile_idc, inband.max_level_idx,
-                             inband.max_tier);
+                             inband.max_tier, inband.max_bit_depth_idc);
 }
 
 std::string build_codecs_string(const std::string& sample_entry_4cc,
@@ -707,7 +746,8 @@ std::string build_codecs_string(const std::string& sample_entry_4cc,
                                 const ColrInfo& /*colr*/) {
   return build_codecs_string(sample_entry_4cc, static_cast<uint8_t>(first_sh.seq_profile_idc),
                              static_cast<uint8_t>(first_sh.seq_level_idx),
-                             static_cast<uint8_t>(first_sh.seq_tier));
+                             static_cast<uint8_t>(first_sh.seq_tier),
+                             static_cast<uint8_t>(first_sh.bit_depth_idc));
 }
 
 }  // namespace av2_obu

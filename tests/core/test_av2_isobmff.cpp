@@ -573,22 +573,22 @@ TEST(AV2ISOBMFFTest, OutOfBandAV2CodecConfigurationBoxSerializeParseAndOrdering)
 
 TEST(AV2ISOBMFFTest, InBandAV2CodecConfigurationBoxSerializeAndParse) {
   InBandAV2CodecConfigurationBox inband;
-  inband.reserved1 = 0;
   inband.max_num_streams_minus_1 = 2;  // 3 streams
   inband.max_profile_idc = 5;
   inband.max_level_idx = 12;
   inband.max_tier = 1;
+  inband.max_bit_depth_idc = 0;  // 10-bit
 
   auto bytes = inband.serialize();
   ASSERT_EQ(bytes.size(), 2u);
 
   InBandAV2CodecConfigurationBox parsed;
   ASSERT_TRUE(InBandAV2CodecConfigurationBox::parse(bytes.data(), bytes.size(), parsed));
-  EXPECT_EQ(parsed.reserved1, 0u);
   EXPECT_EQ(parsed.max_num_streams_minus_1, 2u);
   EXPECT_EQ(parsed.max_profile_idc, 5u);
   EXPECT_EQ(parsed.max_level_idx, 12u);
   EXPECT_EQ(parsed.max_tier, 1u);
+  EXPECT_EQ(parsed.max_bit_depth_idc, 0u);
 
   // Unrecognized trailing bytes in 'av2c' (> 2 bytes) must be ignored per ISOBMFF
   auto bytes_with_trailing = bytes;
@@ -601,15 +601,20 @@ TEST(AV2ISOBMFFTest, InBandAV2CodecConfigurationBoxSerializeAndParse) {
   EXPECT_EQ(parsed_trailing.max_profile_idc, 5u);
   EXPECT_EQ(parsed_trailing.max_level_idx, 12u);
   EXPECT_EQ(parsed_trailing.max_tier, 1u);
+  EXPECT_EQ(parsed_trailing.max_bit_depth_idc, 0u);
 
-  // Test from_parser() with MSDO and SequenceHeader
+  // Test from_parser() with MSDO and SequenceHeader (10-bit SH -> max_bit_depth_idc = 0,
+  // even when paired with an 8-bit SH whose bit_depth_idc = 1)
   std::vector<uint8_t> stream;
   auto append = [&](const std::vector<uint8_t>& b) {
     stream.insert(stream.end(), b.begin(), b.end());
   };
   append(make_td_obu());
   append(make_msdo_obu(/*num_streams=*/3, /*profile_idc=*/4, /*level_idx=*/10, /*tier=*/1));
-  append(make_seq_header_obu(/*xlayer_id=*/0, /*profile_idc=*/1, /*level_idx=*/8, /*tier=*/0));
+  append(make_seq_header_obu(/*xlayer_id=*/0, /*profile_idc=*/1, /*level_idx=*/8, /*tier=*/0,
+                             CHROMA_FORMAT_420, /*bit_depth_idc=*/0));  // 10-bit
+  append(make_seq_header_obu(/*xlayer_id=*/1, /*profile_idc=*/1, /*level_idx=*/8, /*tier=*/0,
+                             CHROMA_FORMAT_420, /*bit_depth_idc=*/1));  // 8-bit
   append(make_clk_obu(0, 0));
 
   const std::string fname = "test_inband_parser.obu";
@@ -622,6 +627,7 @@ TEST(AV2ISOBMFFTest, InBandAV2CodecConfigurationBoxSerializeAndParse) {
   EXPECT_EQ(derived.max_profile_idc, 4u);
   EXPECT_EQ(derived.max_level_idx, 10u);
   EXPECT_EQ(derived.max_tier, 1u);
+  EXPECT_EQ(derived.max_bit_depth_idc, 0u);  // 10-bit (idc=0) > 8-bit (idc=1)
 
   std::remove(fname.c_str());
 }
@@ -691,15 +697,17 @@ TEST(AV2ISOBMFFTest, PixiBoxAndCodecsStringDerivation) {
                                      parsed_pixi_trailing));
   EXPECT_EQ(parsed_pixi_trailing.channels.size(), 4u);
 
-  // Codecs string matches y-guyon/codecs_string: <sample_entry_4cc>.<max_profile_idc><max_level_idx><max_tier>
+  // Codecs string matches y-guyon/bitdepth:
+  // <sample_entry_4cc>.<max_profile_idc><max_level_idx><max_tier><max_bit_depth_idc>
   auto colr_opt = extract_colr_info(parser);
   ASSERT_TRUE(colr_opt.has_value());
   const auto* first_sh = dynamic_cast<const SequenceHeaderOBU*>(parser.obus()[1].get());
   ASSERT_NE(first_sh, nullptr);
   std::string codecs = build_codecs_string("av2E", first_sh->sequence_header(), pixi, *colr_opt);
-  EXPECT_EQ(codecs, "av2E.04M");
-  EXPECT_EQ(build_codecs_string("av2e", 2, 12, 1), "av2e.2CH");
-  EXPECT_EQ(build_codecs_string("av2E", 31, 31, 0), "av2E.VVM");
+  EXPECT_EQ(codecs, "av2E.04M0");
+  EXPECT_EQ(build_codecs_string("av2e", 0, 0, 0, 0), "av2e.00M0");
+  EXPECT_EQ(build_codecs_string("av2e", 4, 10, 1, 1), "av2e.4AH1");
+  EXPECT_EQ(build_codecs_string("av2E", 31, 31, 0, 2), "av2E.VVM2");
 
   std::remove(fname.c_str());
 }
