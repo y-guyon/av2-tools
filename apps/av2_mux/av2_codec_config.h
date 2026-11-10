@@ -99,6 +99,10 @@ struct InBandAV2CodecConfigurationBox {
   static InBandAV2CodecConfigurationBox from_parser(const OBUParser& parser);
 };
 
+// Returns the lowest AV2 profile_idc (per AV2 Table A.4 and av2-isobmff #av2c-semantics)
+// whose allowed feature set includes all features allowed by both `a` and `b`.
+uint8_t combine_av2_profiles(uint8_t a, uint8_t b);
+
 // Extended PixelInformationBox ('pixi', version = 0, px_flags = 1) per ISOBMFF 9th Ed. §12.1.11.
 struct PixiChannel {
   uint8_t bits_per_channel = 8;

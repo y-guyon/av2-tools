@@ -982,5 +982,45 @@ TEST(AV2ISOBMFFTest, MultiCVSOutOfBandRoundTrip) {
   std::remove(out_obu.c_str());
 }
 
+TEST(AV2ISOBMFFTest, MaxProfileIdcFeatureLattice) {
+  // Identical profiles combine to themselves
+  for (uint8_t p : {uint8_t{0}, uint8_t{1}, uint8_t{2}, uint8_t{3}, uint8_t{4}, uint8_t{5},
+                    uint8_t{31}}) {
+    EXPECT_EQ(combine_av2_profiles(p, p), p);
+  }
+  // Profiles 0 and 1 are subsets of all higher profiles
+  EXPECT_EQ(combine_av2_profiles(0, 3), 3u);
+  EXPECT_EQ(combine_av2_profiles(1, 4), 4u);
+  // Profiles 2 (IP2 4:2:0), 3 (IP1 4:2:2), and 4 (IP1 4:4:4) are incomparable -> promote to 5
+  EXPECT_EQ(combine_av2_profiles(3, 4), 5u);
+  EXPECT_EQ(combine_av2_profiles(4, 3), 5u);
+  EXPECT_EQ(combine_av2_profiles(2, 3), 5u);
+  EXPECT_EQ(combine_av2_profiles(2, 4), 5u);
+
+  // Verify InBandAV2CodecConfigurationBox::from_parser with SH(profile=3) + MSDO(profile=4) -> 5
+  std::vector<uint8_t> stream;
+  auto append = [&](const std::vector<uint8_t>& b) {
+    stream.insert(stream.end(), b.begin(), b.end());
+  };
+  append(make_td_obu());
+  append(make_msdo_obu(/*num_streams=*/2, /*profile_idc=*/4, /*level_idx=*/8, /*tier=*/0));
+  append(make_seq_header_obu(/*xlayer_id=*/0, /*profile_idc=*/3, /*level_idx=*/4, /*tier=*/0,
+                             CHROMA_FORMAT_422, /*bit_depth_idc=*/1));
+  append(make_seq_header_obu(/*xlayer_id=*/1, /*profile_idc=*/4, /*level_idx=*/8, /*tier=*/0,
+                             CHROMA_FORMAT_444, /*bit_depth_idc=*/1));
+  append(make_clk_obu(0, 0));
+
+  const std::string path = "test_max_profile_lattice.obu";
+  write_bytes_to_file(path, stream);
+  OBUParser parser;
+  ASSERT_TRUE(parser.parse_file(path));
+
+  auto av2c = InBandAV2CodecConfigurationBox::from_parser(parser);
+  EXPECT_EQ(av2c.max_profile_idc, 5u);
+  EXPECT_EQ(av2c.max_level_idx, 8u);
+  EXPECT_EQ(av2c.max_tier, 0u);
+  std::remove(path.c_str());
+}
+
 }  // namespace
 }  // namespace av2_obu

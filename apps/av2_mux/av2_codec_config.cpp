@@ -372,16 +372,32 @@ bool InBandAV2CodecConfigurationBox::parse(const uint8_t* data, size_t size,
   return true;
 }
 
+uint8_t combine_av2_profiles(uint8_t a, uint8_t b) {
+  a &= 0x1F;
+  b &= 0x1F;
+  if (a == b) return a;
+  const uint8_t lo = std::min(a, b);
+  const uint8_t hi = std::max(a, b);
+  if (lo <= 1) return hi;
+  // Profiles 2 (Main_420_10_IP2), 3 (Main_422_10_IP1), and 4 (Main_444_10_IP1) are incomparable:
+  // profile 2 allows IP 2, profile 3 allows 4:2:2, and profile 4 allows 4:4:4. Any pair of
+  // distinct profiles among {2, 3, 4} requires profile 5 (Main_444C_12_IP2).
+  if (hi <= 4) return 5;
+  return hi;
+}
+
 InBandAV2CodecConfigurationBox InBandAV2CodecConfigurationBox::from_parser(
     const OBUParser& parser) {
   InBandAV2CodecConfigurationBox box;
+  bool has_profile = false;
   for (const auto& obu : parser.obus()) {
     if (obu->type() == OBUType::SEQUENCE_HEADER) {
       const auto* sh_obu = dynamic_cast<const SequenceHeaderOBU*>(obu.get());
       if (!sh_obu) continue;
       const auto& sh = sh_obu->sequence_header();
-      box.max_profile_idc =
-           std::max<uint8_t>(box.max_profile_idc, static_cast<uint8_t>(sh.seq_profile_idc));
+      const uint8_t p = static_cast<uint8_t>(sh.seq_profile_idc);
+      box.max_profile_idc = has_profile ? combine_av2_profiles(box.max_profile_idc, p) : p;
+      has_profile = true;
       box.max_level_idx =
           std::max<uint8_t>(box.max_level_idx, static_cast<uint8_t>(sh.seq_level_idx));
       box.max_tier = std::max<uint8_t>(box.max_tier, static_cast<uint8_t>(sh.seq_tier));
@@ -392,8 +408,9 @@ InBandAV2CodecConfigurationBox InBandAV2CodecConfigurationBox::from_parser(
         uint8_t minus_1 = static_cast<uint8_t>(std::min<uint32_t>(3, msdo->num_streams() - 1));
         box.max_num_streams_minus_1 = std::max(box.max_num_streams_minus_1, minus_1);
       }
-      box.max_profile_idc = std::max<uint8_t>(
-          box.max_profile_idc, static_cast<uint8_t>(msdo->multistream_profile_idc()));
+      const uint8_t p = static_cast<uint8_t>(msdo->multistream_profile_idc());
+      box.max_profile_idc = has_profile ? combine_av2_profiles(box.max_profile_idc, p) : p;
+      has_profile = true;
       box.max_level_idx = std::max<uint8_t>(box.max_level_idx,
                                             static_cast<uint8_t>(msdo->multistream_level_idx()));
       box.max_tier =
