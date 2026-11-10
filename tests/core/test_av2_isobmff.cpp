@@ -680,8 +680,8 @@ TEST(AV2ISOBMFFTest, PixiBoxAndCodecsStringDerivation) {
   PixiBox pixi = PixiBox::from_parser(parser);
   EXPECT_EQ(pixi.version, 0u);
   EXPECT_EQ(pixi.flags, 1u);
-  // xlayer 0 has mlayer 0 (3 texture channels: 2, 3, 4) + mlayer 1 (alpha + 2 unused planes: 5, 0, 0)
-  ASSERT_EQ(pixi.channels.size(), 6u);
+  // Direct sample entry 'pixi' describes (xlayer 0, mlayer 0) only -> 3 texture channels: 2, 3, 4
+  ASSERT_EQ(pixi.channels.size(), 3u);
 
   // Y channel (mlayer 0, plane 0)
   EXPECT_EQ(pixi.channels[0].bits_per_channel, 10u);
@@ -697,28 +697,30 @@ TEST(AV2ISOBMFFTest, PixiBoxAndCodecsStringDerivation) {
     EXPECT_EQ(pixi.channels[i].subsampling_location, 2u);
   }
 
-  // Alpha channel (mlayer 1, plane 0) + 2 unused chroma planes (mlayer 1, planes 1..2)
-  EXPECT_EQ(pixi.channels[3].bits_per_channel, 10u);
-  EXPECT_EQ(pixi.channels[3].channel_idc, 5u);
-  EXPECT_FALSE(pixi.channels[3].subsampling_flag);
-  for (size_t i : {4u, 5u}) {
-    EXPECT_EQ(pixi.channels[i].bits_per_channel, 10u);
-    EXPECT_EQ(pixi.channels[i].channel_idc, 0u);
-    EXPECT_FALSE(pixi.channels[i].subsampling_flag);
+  // Querying (xlayer 0, mlayer 1) yields the alpha channel + 2 unused chroma planes
+  PixiBox pixi_m1 = PixiBox::from_parser(parser, /*target_xlayer_id=*/0, /*target_mlayer_id=*/1);
+  ASSERT_EQ(pixi_m1.channels.size(), 3u);
+  EXPECT_EQ(pixi_m1.channels[0].bits_per_channel, 10u);
+  EXPECT_EQ(pixi_m1.channels[0].channel_idc, 5u);
+  EXPECT_FALSE(pixi_m1.channels[0].subsampling_flag);
+  for (size_t i : {1u, 2u}) {
+    EXPECT_EQ(pixi_m1.channels[i].bits_per_channel, 10u);
+    EXPECT_EQ(pixi_m1.channels[i].channel_idc, 0u);
+    EXPECT_FALSE(pixi_m1.channels[i].subsampling_flag);
   }
 
   // Round-trip serialize/parse PixiBox (including unrecognized trailing bytes per ISOBMFF)
   auto pixi_bytes = pixi.serialize_payload();
   PixiBox parsed_pixi;
   ASSERT_TRUE(PixiBox::parse_payload(pixi_bytes.data(), pixi_bytes.size(), parsed_pixi));
-  ASSERT_EQ(parsed_pixi.channels.size(), 6u);
-  EXPECT_EQ(parsed_pixi.channels[3].channel_idc, 5u);
+  ASSERT_EQ(parsed_pixi.channels.size(), 3u);
+  EXPECT_EQ(parsed_pixi.channels[0].channel_idc, 2u);
   auto pixi_with_trailing = pixi_bytes;
   pixi_with_trailing.push_back(0xAA);
   PixiBox parsed_pixi_trailing;
   ASSERT_TRUE(PixiBox::parse_payload(pixi_with_trailing.data(), pixi_with_trailing.size(),
                                      parsed_pixi_trailing));
-  EXPECT_EQ(parsed_pixi_trailing.channels.size(), 6u);
+  EXPECT_EQ(parsed_pixi_trailing.channels.size(), 3u);
 
   // Direct sample entry 'colr' describes xlayer 0 (9/16/9/0), not xlayer 1 (6/6/6/1)
   auto colr_opt = extract_colr_info(parser);
@@ -737,7 +739,7 @@ TEST(AV2ISOBMFFTest, PixiBoxAndCodecsStringDerivation) {
   const auto* first_sh = dynamic_cast<const SequenceHeaderOBU*>(parser.obus()[1].get());
   ASSERT_NE(first_sh, nullptr);
   std::string codecs = build_codecs_string("av2E", first_sh->sequence_header(), pixi, *colr_opt);
-  EXPECT_EQ(codecs, "av2E.0.04M.10.4.22.09.16.09.0");
+  EXPECT_EQ(codecs, "av2E.0.04M.10.3.22.09.16.09.0");
 
   // Default suffix ".3.22.01.01.01.0" should be omitted
   PixiBox default_pixi;

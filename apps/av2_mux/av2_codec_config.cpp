@@ -494,7 +494,8 @@ bool PixiBox::parse_payload(const uint8_t* data, size_t size, PixiBox& out) {
   return offset <= size;
 }
 
-PixiBox PixiBox::from_parser(const OBUParser& parser, uint8_t target_xlayer_id) {
+PixiBox PixiBox::from_parser(const OBUParser& parser, uint8_t target_xlayer_id,
+                             uint8_t target_mlayer_id) {
   PixiBox pixi;
   pixi.version = 0;
   pixi.flags = 1;
@@ -503,23 +504,18 @@ PixiBox PixiBox::from_parser(const OBUParser& parser, uint8_t target_xlayer_id) 
   std::map<uint8_t, const AV2SequenceHeader*> sh_by_xlayer;
   // Map xlayer_id -> ContentInterpretationOBU
   std::map<uint8_t, const ContentInterpretationOBU*> ci_by_xlayer;
-  // Set of active mlayer_id values within target_xlayer_id (iterated in increasing mlayer_id order
-  // per av2-isobmff #channels).
-  std::set<uint8_t> active_mlayers;
+  // Only describe (target_xlayer_id, target_mlayer_id) per av2-isobmff PR #120.
+  std::set<uint8_t> active_mlayers = {target_mlayer_id};
 
   // Map mlayer_id (within target_xlayer_id) -> (layer_type, auxiliary_type)
   std::map<uint8_t, std::pair<uint32_t, uint32_t>> layer_roles;
 
   for (const auto& obu : parser.obus()) {
     const uint8_t xid = obu->header().get_xlayer_id();
-    const uint8_t mid = obu->header().get_mlayer_id();
     if (obu->type() == OBUType::SEQUENCE_HEADER) {
       if (const auto* sh = dynamic_cast<const SequenceHeaderOBU*>(obu.get())) {
         if (sh_by_xlayer.find(xid) == sh_by_xlayer.end()) {
           sh_by_xlayer[xid] = &sh->sequence_header();
-        }
-        if (xid == target_xlayer_id) {
-          active_mlayers.insert(0);
         }
       }
     } else if (obu->type() == OBUType::CONTENT_INTERPRETATION) {
@@ -537,11 +533,8 @@ PixiBox PixiBox::from_parser(const OBUParser& parser, uint8_t target_xlayer_id) 
             if (gp.xlayer_info.embedded_layer_info_present) {
               for (const auto& el : gp.xlayer_info.embedded_layers) {
                 const uint8_t el_mid = static_cast<uint8_t>(el.mlayer_id);
-                active_mlayers.insert(el_mid);
                 layer_roles[el_mid] = {el.layer_type, el.auxiliary_type};
               }
-            } else {
-              active_mlayers.insert(0);
             }
           }
         } else if (xid == target_xlayer_id) {
@@ -549,11 +542,8 @@ PixiBox PixiBox::from_parser(const OBUParser& parser, uint8_t target_xlayer_id) 
           if (xinfo.embedded_layer_info_present) {
             for (const auto& el : xinfo.embedded_layers) {
               const uint8_t el_mid = static_cast<uint8_t>(el.mlayer_id);
-              active_mlayers.insert(el_mid);
               layer_roles[el_mid] = {el.layer_type, el.auxiliary_type};
             }
-          } else {
-            active_mlayers.insert(0);
           }
         }
       }
@@ -571,8 +561,6 @@ PixiBox PixiBox::from_parser(const OBUParser& parser, uint8_t target_xlayer_id) 
           }
         }
       }
-    } else if (frame_header_of(obu.get()) != nullptr && xid == target_xlayer_id) {
-      active_mlayers.insert(mid);
     }
   }
 
