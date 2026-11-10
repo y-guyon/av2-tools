@@ -14,6 +14,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <map>
+#include <tuple>
 #include <vector>
 
 #include <spdlog/fmt/fmt.h>
@@ -192,45 +194,99 @@ bool Av2Muxer::setup_video_track(const OBUParser& parser) {
 
   std::vector<uint8_t> last_config_bytes;
   uint32_t active_desc_idx = 0;
+  // Active config OBUs carried in 'av2C' ("availability through external means", AV2 §7.3.6.1):
+  // config OBUs remain active until superseded by a new config OBU of the same (type, xlayer, mlayer).
+  std::map<std::tuple<OBUType, uint8_t, uint8_t>, std::vector<const BaseOBU*>> active_config_obus;
+  const SequenceHeaderOBU* active_sh = nullptr;
+  const SequenceHeaderOBU* active_fallback_sh = nullptr;
+  uint32_t non_sync_config_change_count = 0;
 
   for (uint32_t i = 0; i < tus.size(); ++i) {
     if (!tus[i].is_sync_sample()) {
       tu_desc_idx_[i] = active_desc_idx;
+      if (!sample_entries_.empty()) {
+        OutOfBandAV2CodecConfigurationBox probe_av2c(input_ifs_);
+        for (const BaseOBU* p : tus[i]) {
+          if (!is_config_obu_instance(*p)) continue;
+          if (!probe_av2c.append_config_obu(*p)) continue;
+        }
+        const auto& current_av2c = sample_entries_[active_desc_idx - 1].av2c;
+        for (const auto& entry : probe_av2c.config_obus) {
+          bool found = false;
+          for (const auto& existing : current_av2c.config_obus) {
+            if (existing.bytes == entry.bytes) {
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            if (non_sync_config_change_count == 0) {
+              MUX_WARN("Non-sync TU {} carries a modified config OBU ({} xlayer={}) that will be "
+                       "stripped in OutOfBandAV2SampleEntry ('av2E'); use --inband ('av2e') to "
+                       "preserve per-TU config OBU updates",
+                       i, to_string(entry.obu_type), static_cast<unsigned>(entry.xlayer_id));
+            }
+            ++non_sync_config_change_count;
+          }
+        }
+      }
       continue;
     }
 
-    OutOfBandAV2CodecConfigurationBox av2c(input_ifs_);
-    const SequenceHeaderOBU* sh = nullptr;
-    const SequenceHeaderOBU* fallback_sh = nullptr;
-    size_t config_count = 0;
-
+    std::map<std::tuple<OBUType, uint8_t, uint8_t>, std::vector<const BaseOBU*>> tu_config_obus;
     for (const BaseOBU* p : tus[i]) {
       if (!is_config_obu_instance(*p)) continue;
       if (p->type() == OBUType::SEQUENCE_HEADER) {
-        if (p->header().get_xlayer_id() == 0 && !sh) {
-          sh = dynamic_cast<const SequenceHeaderOBU*>(p);
-        } else if (!fallback_sh) {
-          fallback_sh = dynamic_cast<const SequenceHeaderOBU*>(p);
+        if (p->header().get_xlayer_id() == 0) {
+          active_sh = dynamic_cast<const SequenceHeaderOBU*>(p);
+        } else if (!active_fallback_sh ||
+                   p->header().get_xlayer_id() <= active_fallback_sh->header().get_xlayer_id()) {
+          active_fallback_sh = dynamic_cast<const SequenceHeaderOBU*>(p);
         }
       }
-      ++config_count;
-      if (!av2c.append_config_obu(*p)) {
-        MUX_ERROR("Failed to append config OBU (type {}) to av2C configOBUs",
-                  static_cast<int>(p->type()));
-        return false;
+      tu_config_obus[{p->type(), p->header().get_xlayer_id(), p->header().get_mlayer_id()}]
+          .push_back(p);
+    }
+    for (auto& kv : tu_config_obus) {
+      active_config_obus[kv.first] = std::move(kv.second);
+    }
+
+    OutOfBandAV2CodecConfigurationBox av2c(input_ifs_);
+    for (const auto& kv : active_config_obus) {
+      for (const BaseOBU* p : kv.second) {
+        if (!av2c.append_config_obu(*p)) {
+          MUX_ERROR("Failed to append config OBU (type {}) to av2C configOBUs",
+                    static_cast<int>(p->type()));
+          return false;
+        }
       }
     }
-    if (!sh) sh = fallback_sh;
-
+    const SequenceHeaderOBU* sh = active_sh ? active_sh : active_fallback_sh;
     if (!sh) {
       MUX_ERROR("Sync sample TU {} has no Sequence Header OBU", i);
       return false;
     }
     const AV2SequenceHeader& sequence_header = sh->sequence_header();
     av2c.sort_in_tu_order();
+    const size_t config_count = av2c.config_obus.size();
     std::vector<uint8_t> config_bytes = av2c.concatenated_config_obus();
 
     if (!config_bytes.empty() && config_bytes == last_config_bytes) {
+      tu_desc_idx_[i] = active_desc_idx;
+      continue;
+    }
+
+    // Reuse an existing sample entry if an earlier CVS had identical config OBUs
+    uint32_t existing_desc_idx = 0;
+    for (const auto& rec : sample_entries_) {
+      if (rec.config_obu_bytes == config_bytes) {
+        existing_desc_idx = rec.desc_idx;
+        break;
+      }
+    }
+    if (existing_desc_idx != 0) {
+      last_config_bytes = config_bytes;
+      active_desc_idx = existing_desc_idx;
       tu_desc_idx_[i] = active_desc_idx;
       continue;
     }
@@ -289,6 +345,11 @@ bool Av2Muxer::setup_video_track(const OBUParser& parser) {
     sample_entries_.push_back({av2c, sequence_header, colr, new_desc_idx, config_bytes});
     active_desc_idx = new_desc_idx;
     tu_desc_idx_[i] = active_desc_idx;
+  }
+
+  if (non_sync_config_change_count > 1) {
+    MUX_WARN("{} non-sync TUs carried modified config OBUs that were stripped in 'av2E'",
+             non_sync_config_change_count);
   }
 
   if (sample_entries_.empty()) {

@@ -64,6 +64,9 @@ bool ContentInterpretationOBU::parse_payload(std::ifstream& ifs) {
         LIB_DEBUG("  color_primaries = {}", color_primaries_);
         LIB_DEBUG("  transfer_characteristics = {}", transfer_characteristics_);
         LIB_DEBUG("  matrix_coefficients = {}", matrix_coefficients_);
+      } else {
+        resolve_color_description_idc(color_description_idc_, color_primaries_,
+                                      transfer_characteristics_, matrix_coefficients_);
       }
 
       full_range_flag_ = br.read_bit();

@@ -44,10 +44,11 @@ bool is_config_obu_instance(const BaseOBU& obu) {
 }
 
 bool TemporalUnit::is_sync_sample() const {
-  // Per av2-isobmff this TU is a sync sample if every coded extended layer unit present is a CLK
+  // Per av2-isobmff #sync-sample, this TU is a sync sample if every coded extended layer unit
+  // present is a CLK and the sample is self-sufficient for starting decoding for all layers.
   // We rely on AV2 TU ordering: within an xlayer's CLU, frames come in
   // ascending mlayer order, so the FIRST coded frame OBU we encounter per
-  // xlayer in bitstream order IS the first frame at that xlayer's lowest present mlayer 
+  // xlayer in bitstream order IS the first frame at that xlayer's lowest present mlayer
   std::set<uint8_t> seen_xlayers;
   bool any_frame = false;
   for (const auto* obu : obus_) {
@@ -57,7 +58,9 @@ bool TemporalUnit::is_sync_sample() const {
     if (obu->type() != OBUType::CLK) return false;
     any_frame = true;
   }
-  return any_frame;
+  if (!any_frame) return false;
+  if (!expected_xlayers_.empty() && seen_xlayers != expected_xlayers_) return false;
+  return true;
 }
 
 std::vector<const BaseOBU*> TemporalUnit::sample_obus(bool keep_td,

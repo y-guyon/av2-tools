@@ -41,6 +41,7 @@ bool OBUParser::parse_file(const std::string& filename) {
   obus_.clear();
   temporal_units_.clear();
   active_sequence_header_ = nullptr;
+  active_sh_by_xlayer_.clear();
   current_file_ = filename;
 
   // Scan the file
@@ -114,8 +115,13 @@ bool OBUParser::scan_file(std::ifstream& ifs) {
                   static_cast<long long>(pos.payload_pos), static_cast<long long>(pos.end_pos),
                   pos.payload_size);
 
-    // Create OBU object
-    auto obu = BaseOBU::create(ifs, pos, parse_mode_, active_sequence_header_);
+    // Create OBU object using the active sequence header for this xlayer_id (if known)
+    const AV2SequenceHeader* sh_for_obu = active_sequence_header_;
+    if (auto sh_it = active_sh_by_xlayer_.find(temp_header.get_xlayer_id());
+        sh_it != active_sh_by_xlayer_.end()) {
+      sh_for_obu = sh_it->second;
+    }
+    auto obu = BaseOBU::create(ifs, pos, parse_mode_, sh_for_obu);
     if (!obu) {
       LIB_WARN("Skipping OBU at position {} (parse failed)", static_cast<long long>(record_begin));
       ifs.seekg(pos.end_pos);
@@ -123,12 +129,12 @@ bool OBUParser::scan_file(std::ifstream& ifs) {
       continue;
     }
 
-    // Track active sequence header for subsequent OBUs
+    // Track active sequence header for subsequent OBUs (per xlayer_id and fallback)
     if (obu->type() == OBUType::SEQUENCE_HEADER) {
       auto* sh_obu = dynamic_cast<const SequenceHeaderOBU*>(obu.get());
       if (sh_obu) {
-        // TODO: Handle multiple sequence headers and changes (currently just tracks the last one)
         active_sequence_header_ = &sh_obu->sequence_header();
+        active_sh_by_xlayer_[obu->header().get_xlayer_id()] = &sh_obu->sequence_header();
       }
     }
 
@@ -257,15 +263,21 @@ OBUParser::Statistics OBUParser::get_statistics() const {
   stats.layers.is_single_layer =
     (stats.layers.mlayer_ids.size() == 1 && stats.layers.xlayer_ids.size() == 1);
 
-  // Check if sequence headers change
+  // Check if sequence headers change within any xlayer_id
   if (sequence_headers.size() > 1) {
-    // Compare sequence headers by raw payload bytes
-    const auto& first_payload = sequence_headers[0]->raw_payload();
+    std::map<uint8_t, const std::vector<uint8_t>*> first_payload_by_xlayer;
 
-    for (size_t i = 1; i < sequence_headers.size(); ++i) {
+    for (size_t i = 0; i < sequence_headers.size(); ++i) {
+      const uint8_t xid = sequence_headers[i]->header().get_xlayer_id();
       const auto& current_payload = sequence_headers[i]->raw_payload();
+      auto it = first_payload_by_xlayer.find(xid);
+      if (it == first_payload_by_xlayer.end()) {
+        first_payload_by_xlayer[xid] = &current_payload;
+        continue;
+      }
+      const auto& first_payload = *it->second;
 
-      // Compare sizes and content
+      // Compare sizes and content within the same xlayer_id
       if (first_payload.size() != current_payload.size() ||
           std::memcmp(first_payload.data(), current_payload.data(), first_payload.size()) != 0) {
         stats.sequence_headers.has_changes = true;
@@ -332,6 +344,17 @@ void OBUParser::build_temporal_units() {
 
   if (!current_tu.empty()) {
     temporal_units_.push_back(std::move(current_tu));
+  }
+
+  std::set<uint8_t> coded_xlayers;
+  for (const auto& obu : obus_) {
+    const OBUType t = obu->type();
+    if (is_tile_group(t) || is_tip_frame(t) || is_sef(t) || t == OBUType::BRIDGE_FRAME) {
+      coded_xlayers.insert(obu->header().get_xlayer_id());
+    }
+  }
+  for (auto& tu : temporal_units_) {
+    tu.expected_xlayers_ = coded_xlayers;
   }
 
   LIB_DEBUG("Built {} temporal units", temporal_units_.size());

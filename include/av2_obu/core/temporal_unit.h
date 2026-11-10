@@ -14,6 +14,8 @@
 #include <nlohmann/json.hpp>
 
 #include <cstddef>
+#include <cstdint>
+#include <set>
 #include <vector>
 
 namespace av2_obu {
@@ -61,6 +63,7 @@ private:
 
   size_t index_ = 0;
   std::vector<const BaseOBU*> obus_;
+  std::set<uint8_t> expected_xlayers_;
   uint32_t display_order_ = 0;
 };
 

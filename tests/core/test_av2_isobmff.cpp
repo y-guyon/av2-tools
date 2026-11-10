@@ -1133,5 +1133,122 @@ TEST(AV2ISOBMFFTest, LayerOrderAndReconstructionPointIds) {
   EXPECT_FALSE(parse_reconstruction_point_id(0x0007, xid, ops_id, op_idx));
 }
 
+TEST(AV2ISOBMFFTest, ColorDescriptionIdcPresetsAndMultistreamSyncAndCarryForward) {
+  // 1. Verify resolve_color_description_idc presets 1..5 per AV2 Spec Table
+  //    table-ops-color-description-idc, both directly and through ContentInterpretationOBU +
+  //    extract_colr_info.
+  auto make_ci_preset_obu = [](uint32_t color_desc_idc, bool full_range) {
+    BitstreamWriter bw;
+    bw.write_bits(1, 2);  // scan_type_idc = 1
+    bw.write_bit(1);      // color_description_present_flag = 1
+    bw.write_bit(0);      // chroma_sample_position_present_flag = 0
+    bw.write_bit(0);      // aspect_ratio_info_present_flag = 0
+    bw.write_bit(0);      // timing_info_present_flag = 0
+    bw.write_bits(0, 2);  // reserved_2bit = 0
+    write_rg(bw, color_desc_idc, 2);
+    bw.write_bit(full_range ? 1 : 0);
+    append_extensible_trailing_bits(bw);
+    return wrap_annexb_obu(OBUType::CONTENT_INTERPRETATION, bw.bytes(), 0, 0, 0);
+  };
+
+  struct PresetCase {
+    uint32_t idc;
+    bool full_range;
+    uint16_t cp;
+    uint16_t tc;
+    uint16_t mc;
+  };
+  const std::vector<PresetCase> cases = {
+      {1, false, 1, 1, 1},    // BT.709 / sRGB SDR
+      {2, false, 9, 16, 9},   // BT.2100 PQ HDR
+      {3, false, 9, 18, 9},   // BT.2100 HLG HDR
+      {4, true, 1, 13, 0},    // sRGB Identity
+      {5, false, 1, 13, 5},   // sYCC
+  };
+  for (const auto& c : cases) {
+    std::vector<uint8_t> stream;
+    auto append = [&](const std::vector<uint8_t>& b) {
+      stream.insert(stream.end(), b.begin(), b.end());
+    };
+    append(make_td_obu());
+    append(make_seq_header_obu(0, 0, 1, 0, CHROMA_FORMAT_420, 1, 176, 144));
+    append(make_ci_preset_obu(c.idc, c.full_range));
+    append(make_clk_obu(0, 0));
+
+    const std::string path = "test_ci_preset.obu";
+    write_bytes_to_file(path, stream);
+    OBUParser parser;
+    ASSERT_TRUE(parser.parse_file(path));
+    auto colr = extract_colr_info(parser, 0);
+    ASSERT_TRUE(colr.has_value());
+    EXPECT_EQ(colr->colour_primaries, c.cp);
+    EXPECT_EQ(colr->transfer_characteristics, c.tc);
+    EXPECT_EQ(colr->matrix_coefficients, c.mc);
+    EXPECT_EQ(colr->full_range_flag, c.full_range ? 1u : 0u);
+    std::remove(path.c_str());
+  }
+
+  // 2. Multi-xlayer stream where xlayer 0 is present in TU 0 and TU 2 (30 fps) and xlayer 1 is
+  //    present in TU 0, TU 1, and TU 2 (60 fps), with MSDO only in TU 0:
+  //    - TU 0 has CLK(x=0) + CLK(x=1) -> sync sample
+  //    - TU 1 has only CLK(x=1) (xlayer 0 is absent) -> NOT a sync sample
+  //    - TU 2 has new SH(x=0) + CLK(x=0) + CLK(x=1), omitting MSDO -> sync sample, and Av2Muxer
+  //      carries forward MSDO from TU 0 into the second sample entry's 'av2C'.
+  std::vector<uint8_t> ms_stream;
+  auto append_ms = [&](const std::vector<uint8_t>& b) {
+    ms_stream.insert(ms_stream.end(), b.begin(), b.end());
+  };
+  // TU 0: MSDO(x=31), SH(x=0, 176x144), SH(x=1, 176x144), CLK(x=0), CLK(x=1)
+  append_ms(make_td_obu());
+  append_ms(make_msdo_obu(2, 1, 4, 0));
+  append_ms(make_seq_header_obu(0, 1, 4, 0, CHROMA_FORMAT_420, 1, 176, 144));
+  append_ms(make_seq_header_obu(1, 1, 4, 0, CHROMA_FORMAT_420, 1, 176, 144));
+  append_ms(make_clk_obu(0, 0));
+  append_ms(make_clk_obu(1, 0));
+
+  // TU 1: only CLK(x=1) (xlayer 0 absent)
+  append_ms(make_td_obu());
+  append_ms(make_clk_obu(1, 1));
+
+  // TU 2: SH(x=0, 160x120) changes, MSDO and SH(x=1) not repeated, CLK(x=0), CLK(x=1)
+  append_ms(make_td_obu());
+  append_ms(make_seq_header_obu(0, 1, 4, 0, CHROMA_FORMAT_420, 1, 160, 120));
+  append_ms(make_clk_obu(0, 2));
+  append_ms(make_clk_obu(1, 2));
+
+  const std::string ms_in = "test_ms_carry.obu";
+  const std::string ms_mp4 = "test_ms_carry.mp4";
+  const std::string ms_demux = "test_ms_carry_demux.obu";
+  write_bytes_to_file(ms_in, ms_stream);
+
+  OBUParser ms_parser;
+  ASSERT_TRUE(ms_parser.parse_file(ms_in));
+  ASSERT_EQ(ms_parser.temporal_units().size(), 3u);
+  EXPECT_TRUE(ms_parser.temporal_units()[0].is_sync_sample());
+  EXPECT_FALSE(ms_parser.temporal_units()[1].is_sync_sample());
+  EXPECT_TRUE(ms_parser.temporal_units()[2].is_sync_sample());
+
+  UserOptions opts;
+  opts.frame_rate = 60.0;
+  MuxStrategy strat = determine_strategy(ms_parser.get_statistics(), opts);
+  Av2Muxer muxer(ms_in, strat);
+  ASSERT_TRUE(muxer.package(ms_parser, ms_mp4));
+
+  ASSERT_TRUE(Av2Demuxer().demux(ms_mp4, ms_demux));
+  OBUParser demux_parser;
+  ASSERT_TRUE(demux_parser.parse_file(ms_demux));
+  ASSERT_EQ(demux_parser.temporal_units().size(), 3u);
+  // TU 2 in the demuxed stream has MSDO + SH(x=0) + SH(x=1) carried forward in its 'av2C'
+  const auto& demux_tu2 = demux_parser.temporal_units()[2];
+  ASSERT_GE(demux_tu2.obus().size(), 5u);
+  EXPECT_EQ(demux_tu2.obus()[0]->type(), OBUType::MSDO);
+  EXPECT_EQ(demux_tu2.obus()[1]->type(), OBUType::SEQUENCE_HEADER);
+  EXPECT_EQ(demux_tu2.obus()[2]->type(), OBUType::SEQUENCE_HEADER);
+
+  std::remove(ms_in.c_str());
+  std::remove(ms_mp4.c_str());
+  std::remove(ms_demux.c_str());
+}
+
 }  // namespace
 }  // namespace av2_obu

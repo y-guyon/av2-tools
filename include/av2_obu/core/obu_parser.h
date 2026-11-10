@@ -140,6 +140,7 @@ private:
   std::vector<TemporalUnit> temporal_units_;
   ParseMode parse_mode_ = ParseMode::kDeep;
   const AV2SequenceHeader* active_sequence_header_ = nullptr;
+  std::map<uint8_t, const AV2SequenceHeader*> active_sh_by_xlayer_;
   bool include_temporal_delimiters_ = false;
 };
 

@@ -75,6 +75,12 @@ bool Mp4Writer::add_video_track_outofband(uint32_t timescale, uint16_t width, ui
     return false;
   }
 
+  err = MJ2SetTrackDimensions(track_, width, height);
+  if (err != MP4NoErr) {
+    MUX_ERROR("MJ2SetTrackDimensions failed (err={})", err);
+    return false;
+  }
+
   err = MP4NewTrackMedia(track_, &media_, MP4VisualHandlerType, timescale, /*dataRef=*/nullptr);
   if (err != MP4NoErr || !media_) {
     MUX_ERROR("MP4NewTrackMedia failed (err={})", err);
@@ -92,6 +98,12 @@ bool Mp4Writer::add_video_track_inband(uint32_t timescale, uint16_t width, uint1
   MP4Err err = MP4NewMovieTrack(movie_, MP4NewTrackIsVisual, &track_);
   if (err != MP4NoErr || !track_) {
     MUX_ERROR("MP4NewMovieTrack failed (err={})", err);
+    return false;
+  }
+
+  err = MJ2SetTrackDimensions(track_, width, height);
+  if (err != MP4NoErr) {
+    MUX_ERROR("MJ2SetTrackDimensions failed (err={})", err);
     return false;
   }
 
@@ -411,6 +423,13 @@ bool Mp4Writer::flush_chunk() {
 bool Mp4Writer::finalize(const std::string& output_path) {
   if (!movie_) return false;
   if (!flush_chunk()) return false;
+  if (media_) {
+    MP4Err err = MP4EndMediaEdits(media_);
+    if (err != MP4NoErr) {
+      MUX_ERROR("MP4EndMediaEdits failed (err={})", err);
+      return false;
+    }
+  }
 
   MP4Err err = MP4WriteMovieToFile(movie_, output_path.c_str());
   if (err != MP4NoErr) {

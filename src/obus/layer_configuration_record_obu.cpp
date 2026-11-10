@@ -59,6 +59,9 @@ static LCROBU::ColorInfo parse_color_info(BitstreamReader& br) {
     ci.color_primaries = br.read_bits(8);
     ci.transfer_characteristics = br.read_bits(8);
     ci.matrix_coefficients = br.read_bits(8);
+  } else {
+    resolve_color_description_idc(ci.color_description_idc, ci.color_primaries,
+                                  ci.transfer_characteristics, ci.matrix_coefficients);
   }
   ci.full_range_flag = br.read_bit();
   return ci;

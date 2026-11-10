@@ -151,6 +151,43 @@ enum MatrixCoefficients : uint32_t {
   MC_ICTCP = 14         // BT.2100 ICtCp
 };
 
+// Resolves preset CICP values when color_description_idc != 0
+// (AV2 spec Table ops_color_description_idc).
+inline void resolve_color_description_idc(uint32_t idc, uint32_t& cp, uint32_t& tc, uint32_t& mc) {
+  switch (idc) {
+    case 1:  // BT.709 SDR
+      cp = CP_BT_709;
+      tc = TC_BT_709;
+      mc = MC_BT_709;
+      break;
+    case 2:  // BT.2100 PQ
+      cp = CP_BT_2020;
+      tc = TC_SMPTE_2084;
+      mc = MC_BT_2020_NCL;
+      break;
+    case 3:  // BT.2100 HLG
+      cp = CP_BT_2020;
+      tc = TC_HLG;
+      mc = MC_BT_2020_NCL;
+      break;
+    case 4:  // sRGB
+      cp = CP_BT_709;
+      tc = TC_SRGB;
+      mc = MC_IDENTITY;
+      break;
+    case 5:  // sYCC
+      cp = CP_BT_709;
+      tc = TC_SRGB;
+      mc = MC_BT_470_B_G;
+      break;
+    default:
+      cp = CP_UNSPECIFIED;
+      tc = TC_UNSPECIFIED;
+      mc = MC_UNSPECIFIED;
+      break;
+  }
+}
+
 // Chroma sample position
 enum ChromaSamplePosition : uint32_t {
   CSP_LEFT = 0,        // 4:2:2: H-offset 0; 4:2:0: H-offset 0, V-offset 0.5
