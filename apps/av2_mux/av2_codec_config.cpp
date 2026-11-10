@@ -351,53 +351,107 @@ bool OutOfBandAV2CodecConfigurationBox::parse(const uint8_t* data, size_t size,
 
 // ==================== InBandAV2CodecConfigurationBox ('av2c') ====================
 
+namespace {
+
+uint32_t bit_depth_from_idc(uint8_t idc) {
+  if (idc == 1) return 8;
+  if (idc == 0) return 10;
+  if (idc == 2) return 12;
+  return 12u + idc;
+}
+
+}  // namespace
+
+uint8_t combine_av2_profiles(uint8_t a, uint8_t b) {
+  a &= 0x1F;
+  b &= 0x1F;
+  if (a == b) return a;
+  const uint8_t lo = std::min(a, b);
+  const uint8_t hi = std::max(a, b);
+  if (lo <= 1) return hi;
+  // Profiles 2 (Main_420_10_IP2), 3 (Main_422_10_IP1), and 4 (Main_444_10_IP1) are incomparable:
+  // profile 2 allows IP 2, profile 3 allows 4:2:2, and profile 4 allows 4:4:4. Any pair of
+  // distinct profiles among {2, 3, 4} requires profile 5 (Main_444C_12_IP2).
+  if (hi <= 4) return 5;
+  return hi;
+}
+
 std::vector<uint8_t> InBandAV2CodecConfigurationBox::serialize() const {
-  uint8_t b0 = static_cast<uint8_t>(((reserved1 & 0x07) << 5) |
-                                    ((max_num_streams_minus_1 & 0x03) << 3) |
-                                    ((max_profile_idc >> 2) & 0x07));
-  uint8_t b1 = static_cast<uint8_t>(((max_profile_idc & 0x03) << 6) |
-                                    ((max_level_idx & 0x1F) << 1) |
-                                    (max_tier & 0x01));
+  uint8_t b0 = static_cast<uint8_t>(((max_num_streams_minus1 & 0x03) << 6) |
+                                    ((max_profile_idc & 0x1F) << 1) |
+                                    ((max_level_idx >> 4) & 0x01));
+  uint8_t b1 = static_cast<uint8_t>(((max_level_idx & 0x0F) << 4) |
+                                    ((max_tier & 0x01) << 3) |
+                                    (max_bit_depth_idc & 0x07));
   return {b0, b1};
 }
 
 bool InBandAV2CodecConfigurationBox::parse(const uint8_t* data, size_t size,
                                            InBandAV2CodecConfigurationBox& out) {
   if (!data || size < 2) return false;
-  out.reserved1 = (data[0] >> 5) & 0x07;
-  out.max_num_streams_minus_1 = (data[0] >> 3) & 0x03;
-  out.max_profile_idc = static_cast<uint8_t>(((data[0] & 0x07) << 2) | ((data[1] >> 6) & 0x03));
-  out.max_level_idx = (data[1] >> 1) & 0x1F;
-  out.max_tier = data[1] & 0x01;
+  out.max_num_streams_minus1 = (data[0] >> 6) & 0x03;
+  out.max_profile_idc = (data[0] >> 1) & 0x1F;
+  out.max_level_idx = static_cast<uint8_t>(((data[0] & 0x01) << 4) | ((data[1] >> 4) & 0x0F));
+  out.max_tier = (data[1] >> 3) & 0x01;
+  out.max_bit_depth_idc = data[1] & 0x07;
   return true;
 }
 
 InBandAV2CodecConfigurationBox InBandAV2CodecConfigurationBox::from_parser(
     const OBUParser& parser) {
   InBandAV2CodecConfigurationBox box;
+  bool has_profile = false;
+  bool has_bit_depth = false;
+  auto update_bit_depth_idc = [&](uint8_t idc) {
+    idc &= 0x07;
+    if (!has_bit_depth ||
+        bit_depth_from_idc(idc) > bit_depth_from_idc(box.max_bit_depth_idc)) {
+      box.max_bit_depth_idc = idc;
+      has_bit_depth = true;
+    }
+  };
+
   for (const auto& obu : parser.obus()) {
     if (obu->type() == OBUType::SEQUENCE_HEADER) {
       const auto* sh_obu = dynamic_cast<const SequenceHeaderOBU*>(obu.get());
       if (!sh_obu) continue;
       const auto& sh = sh_obu->sequence_header();
-      box.max_profile_idc =
-           std::max<uint8_t>(box.max_profile_idc, static_cast<uint8_t>(sh.seq_profile_idc));
+      const uint8_t p = static_cast<uint8_t>(sh.seq_profile_idc);
+      box.max_profile_idc = has_profile ? combine_av2_profiles(box.max_profile_idc, p) : p;
+      has_profile = true;
       box.max_level_idx =
           std::max<uint8_t>(box.max_level_idx, static_cast<uint8_t>(sh.seq_level_idx));
       box.max_tier = std::max<uint8_t>(box.max_tier, static_cast<uint8_t>(sh.seq_tier));
+      update_bit_depth_idc(static_cast<uint8_t>(sh.bit_depth_idc));
     } else if (obu->type() == OBUType::MSDO) {
       const auto* msdo = dynamic_cast<const MSDOOBU*>(obu.get());
       if (!msdo) continue;
       if (msdo->num_streams() >= 2) {
-        uint8_t minus_1 = static_cast<uint8_t>(std::min<uint32_t>(3, msdo->num_streams() - 1));
-        box.max_num_streams_minus_1 = std::max(box.max_num_streams_minus_1, minus_1);
+        uint8_t minus1 = static_cast<uint8_t>(std::min<uint32_t>(3, msdo->num_streams() - 1));
+        box.max_num_streams_minus1 = std::max(box.max_num_streams_minus1, minus1);
       }
-      box.max_profile_idc = std::max<uint8_t>(
-          box.max_profile_idc, static_cast<uint8_t>(msdo->multistream_profile_idc()));
+      const uint8_t p = static_cast<uint8_t>(msdo->multistream_profile_idc());
+      box.max_profile_idc = has_profile ? combine_av2_profiles(box.max_profile_idc, p) : p;
+      has_profile = true;
       box.max_level_idx = std::max<uint8_t>(box.max_level_idx,
                                             static_cast<uint8_t>(msdo->multistream_level_idx()));
       box.max_tier =
           std::max<uint8_t>(box.max_tier, static_cast<uint8_t>(msdo->multistream_tier()));
+    } else if (obu->type() == OBUType::LAYER_CONFIGURATION_RECORD) {
+      const auto* lcr = dynamic_cast<const LayerConfigurationRecordOBU*>(obu.get());
+      if (!lcr) continue;
+      if (lcr->is_global()) {
+        for (const auto& gp : lcr->global_payloads()) {
+          if (gp.xlayer_info.rep_info_present && gp.xlayer_info.rep_info.format_info_present) {
+            update_bit_depth_idc(static_cast<uint8_t>(gp.xlayer_info.rep_info.bit_depth_idc));
+          }
+        }
+      } else {
+        const auto& xinfo = lcr->local_xlayer_info();
+        if (xinfo.rep_info_present && xinfo.rep_info.format_info_present) {
+          update_bit_depth_idc(static_cast<uint8_t>(xinfo.rep_info.bit_depth_idc));
+        }
+      }
     }
   }
   return box;
@@ -686,38 +740,117 @@ PixiBox PixiBox::from_parser(const OBUParser& parser, uint8_t target_xlayer_id) 
   return pixi;
 }
 
+static char to_base32_char(uint8_t val) {
+  val &= 0x1F;
+  return val < 10 ? static_cast<char>('0' + val) : static_cast<char>('A' + (val - 10));
+}
+
+std::string build_codecs_string(const std::string& sample_entry_4cc,
+                                uint8_t max_profile_idc,
+                                uint8_t max_level_idx,
+                                uint8_t max_tier,
+                                uint8_t max_bit_depth_idc) {
+  const char tier_char = (max_tier == 0) ? 'M' : 'H';
+  return fmt::format("{}.{}{}{}{}", sample_entry_4cc, to_base32_char(max_profile_idc),
+                     to_base32_char(max_level_idx), tier_char,
+                     static_cast<unsigned>(max_bit_depth_idc & 0x07));
+}
+
+std::string build_codecs_string(const std::string& sample_entry_4cc,
+                                const InBandAV2CodecConfigurationBox& inband) {
+  return build_codecs_string(sample_entry_4cc, inband.max_profile_idc, inband.max_level_idx,
+                             inband.max_tier, inband.max_bit_depth_idc);
+}
+
 std::string build_codecs_string(const std::string& sample_entry_4cc,
                                 const AV2SequenceHeader& first_sh,
-                                const PixiBox& pixi,
-                                const ColrInfo& colr) {
-  const char tier_char = (first_sh.seq_tier == 0) ? 'M' : 'H';
+                                const PixiBox& /*pixi*/,
+                                const ColrInfo& /*colr*/) {
+  return build_codecs_string(sample_entry_4cc, static_cast<uint8_t>(first_sh.seq_profile_idc),
+                             static_cast<uint8_t>(first_sh.seq_level_idx),
+                             static_cast<uint8_t>(first_sh.seq_tier),
+                             static_cast<uint8_t>(first_sh.bit_depth_idc));
+}
 
-  bool has_alpha = false;
-  uint8_t sub_type = 0;
-  uint8_t sub_loc = 0;
-  for (const auto& ch : pixi.channels) {
-    if (ch.channel_idc == 5) {
-      has_alpha = true;
-    }
-    if ((ch.channel_idc == 3 || ch.channel_idc == 4) && ch.subsampling_flag) {
-      sub_type = ch.subsampling_type;
-      sub_loc = ch.subsampling_location;
+std::vector<std::pair<uint8_t, uint8_t>> collect_ordered_layers(const OBUParser& parser) {
+  std::set<std::pair<uint8_t, uint8_t>> layers;
+  for (const auto& obu : parser.obus()) {
+    const uint8_t xid = obu->header().get_xlayer_id();
+    const uint8_t mid = obu->header().get_mlayer_id();
+    if (obu->type() == OBUType::SEQUENCE_HEADER && xid != GLOBAL_XLAYER_ID) {
+      layers.insert({xid, 0});
+    } else if (obu->type() == OBUType::LAYER_CONFIGURATION_RECORD) {
+      if (const auto* lcr = dynamic_cast<const LayerConfigurationRecordOBU*>(obu.get())) {
+        if (lcr->is_global()) {
+          for (const auto& gp : lcr->global_payloads()) {
+            const uint8_t gp_xid = static_cast<uint8_t>(gp.xlayer_id);
+            if (gp.xlayer_info.embedded_layer_info_present) {
+              for (const auto& el : gp.xlayer_info.embedded_layers) {
+                layers.insert({gp_xid, static_cast<uint8_t>(el.mlayer_id)});
+              }
+            } else {
+              layers.insert({gp_xid, 0});
+            }
+          }
+        } else if (xid != GLOBAL_XLAYER_ID) {
+          const auto& xinfo = lcr->local_xlayer_info();
+          if (xinfo.embedded_layer_info_present) {
+            for (const auto& el : xinfo.embedded_layers) {
+              layers.insert({xid, static_cast<uint8_t>(el.mlayer_id)});
+            }
+          } else {
+            layers.insert({xid, 0});
+          }
+        }
+      }
+    } else if (frame_header_of(obu.get()) != nullptr && xid != GLOBAL_XLAYER_ID) {
+      layers.insert({xid, mid});
     }
   }
+  return {layers.begin(), layers.end()};
+}
 
-  const uint32_t channel_count = first_sh.NumPlanes + (has_alpha ? 1u : 0u);
-  const std::string prefix =
-      fmt::format("{}.{}.{:02d}{}.{:02d}", sample_entry_4cc, first_sh.seq_profile_idc,
-                  first_sh.seq_level_idx, tier_char, first_sh.BitDepth);
-  const std::string suffix = fmt::format(
-      ".{}.{}{}.{:02d}.{:02d}.{:02d}.{}", channel_count, sub_type, sub_loc,
-      colr.colour_primaries, colr.transfer_characteristics, colr.matrix_coefficients,
-      colr.full_range_flag);
-
-  if (suffix == ".3.22.01.01.01.0") {
-    return prefix;
+int find_layer_order_index(const std::vector<std::pair<uint8_t, uint8_t>>& ordered_layers,
+                           uint8_t xlayer_id, uint8_t mlayer_id) {
+  for (size_t i = 0; i < ordered_layers.size(); ++i) {
+    if (ordered_layers[i].first == xlayer_id && ordered_layers[i].second == mlayer_id) {
+      return static_cast<int>(i);
+    }
   }
-  return prefix + suffix;
+  return -1;
+}
+
+uint64_t compute_layer_bitset(const std::vector<std::pair<uint8_t, uint8_t>>& ordered_layers,
+                              const std::vector<std::pair<uint8_t, uint8_t>>& selected_layers) {
+  uint64_t mask = 0;
+  for (const auto& [xid, mid] : selected_layers) {
+    int idx = find_layer_order_index(ordered_layers, xid, mid);
+    if (idx >= 0 && idx < 64) {
+      mask |= (1ULL << idx);
+    }
+  }
+  return mask;
+}
+
+bool make_reconstruction_point_id(uint8_t obu_xlayer_id, uint8_t ops_id, uint8_t op_index,
+                                  uint16_t& out_id) {
+  if (obu_xlayer_id > 31 || ops_id > 15 || op_index >= 7) {
+    return false;
+  }
+  out_id = static_cast<uint16_t>(((obu_xlayer_id & 0x1F) << 7) | ((ops_id & 0x0F) << 3) |
+                                 (op_index & 0x07));
+  return true;
+}
+
+bool parse_reconstruction_point_id(uint16_t id, uint8_t& out_obu_xlayer_id, uint8_t& out_ops_id,
+                                   uint8_t& out_op_index) {
+  if (id > 0x0FFF) return false;
+  uint8_t op_idx = static_cast<uint8_t>(id & 0x07);
+  if (op_idx == 7) return false;  // 3 LSBs shall not be all ones (ops_cnt <= 7 -> op_index in 0..6)
+  out_obu_xlayer_id = static_cast<uint8_t>((id >> 7) & 0x1F);
+  out_ops_id = static_cast<uint8_t>((id >> 3) & 0x0F);
+  out_op_index = op_idx;
+  return true;
 }
 
 }  // namespace av2_obu

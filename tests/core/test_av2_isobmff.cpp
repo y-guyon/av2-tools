@@ -590,22 +590,22 @@ TEST(AV2ISOBMFFTest, OutOfBandAV2CodecConfigurationBoxSerializeParseAndOrdering)
 
 TEST(AV2ISOBMFFTest, InBandAV2CodecConfigurationBoxSerializeAndParse) {
   InBandAV2CodecConfigurationBox inband;
-  inband.reserved1 = 0;
-  inband.max_num_streams_minus_1 = 2;  // 3 streams
+  inband.max_num_streams_minus1 = 2;  // 3 streams
   inband.max_profile_idc = 5;
   inband.max_level_idx = 12;
   inband.max_tier = 1;
+  inband.max_bit_depth_idc = 0;  // 10-bit
 
   auto bytes = inband.serialize();
   ASSERT_EQ(bytes.size(), 2u);
 
   InBandAV2CodecConfigurationBox parsed;
   ASSERT_TRUE(InBandAV2CodecConfigurationBox::parse(bytes.data(), bytes.size(), parsed));
-  EXPECT_EQ(parsed.reserved1, 0u);
-  EXPECT_EQ(parsed.max_num_streams_minus_1, 2u);
+  EXPECT_EQ(parsed.max_num_streams_minus1, 2u);
   EXPECT_EQ(parsed.max_profile_idc, 5u);
   EXPECT_EQ(parsed.max_level_idx, 12u);
   EXPECT_EQ(parsed.max_tier, 1u);
+  EXPECT_EQ(parsed.max_bit_depth_idc, 0u);
 
   // Unrecognized trailing bytes in 'av2c' (> 2 bytes) must be ignored per ISOBMFF
   auto bytes_with_trailing = bytes;
@@ -614,19 +614,24 @@ TEST(AV2ISOBMFFTest, InBandAV2CodecConfigurationBoxSerializeAndParse) {
   InBandAV2CodecConfigurationBox parsed_trailing;
   ASSERT_TRUE(InBandAV2CodecConfigurationBox::parse(bytes_with_trailing.data(),
                                                     bytes_with_trailing.size(), parsed_trailing));
-  EXPECT_EQ(parsed_trailing.max_num_streams_minus_1, 2u);
+  EXPECT_EQ(parsed_trailing.max_num_streams_minus1, 2u);
   EXPECT_EQ(parsed_trailing.max_profile_idc, 5u);
   EXPECT_EQ(parsed_trailing.max_level_idx, 12u);
   EXPECT_EQ(parsed_trailing.max_tier, 1u);
+  EXPECT_EQ(parsed_trailing.max_bit_depth_idc, 0u);
 
-  // Test from_parser() with MSDO and SequenceHeader
+  // Test from_parser() with MSDO and SequenceHeader (10-bit SH -> max_bit_depth_idc = 0,
+  // even when paired with an 8-bit SH whose bit_depth_idc = 1)
   std::vector<uint8_t> stream;
   auto append = [&](const std::vector<uint8_t>& b) {
     stream.insert(stream.end(), b.begin(), b.end());
   };
   append(make_td_obu());
   append(make_msdo_obu(/*num_streams=*/3, /*profile_idc=*/4, /*level_idx=*/10, /*tier=*/1));
-  append(make_seq_header_obu(/*xlayer_id=*/0, /*profile_idc=*/1, /*level_idx=*/8, /*tier=*/0));
+  append(make_seq_header_obu(/*xlayer_id=*/0, /*profile_idc=*/1, /*level_idx=*/8, /*tier=*/0,
+                             CHROMA_FORMAT_420, /*bit_depth_idc=*/0));  // 10-bit
+  append(make_seq_header_obu(/*xlayer_id=*/1, /*profile_idc=*/1, /*level_idx=*/8, /*tier=*/0,
+                             CHROMA_FORMAT_420, /*bit_depth_idc=*/1));  // 8-bit
   append(make_clk_obu(0, 0));
 
   const std::string fname = "test_inband_parser.obu";
@@ -635,10 +640,11 @@ TEST(AV2ISOBMFFTest, InBandAV2CodecConfigurationBoxSerializeAndParse) {
   ASSERT_TRUE(parser.parse_file(fname));
 
   auto derived = InBandAV2CodecConfigurationBox::from_parser(parser);
-  EXPECT_EQ(derived.max_num_streams_minus_1, 2u);
+  EXPECT_EQ(derived.max_num_streams_minus1, 2u);
   EXPECT_EQ(derived.max_profile_idc, 4u);
   EXPECT_EQ(derived.max_level_idx, 10u);
   EXPECT_EQ(derived.max_tier, 1u);
+  EXPECT_EQ(derived.max_bit_depth_idc, 0u);
 
   std::remove(fname.c_str());
 }
@@ -733,19 +739,15 @@ TEST(AV2ISOBMFFTest, PixiBoxAndCodecsStringDerivation) {
   EXPECT_EQ(colr_x1->colour_primaries, 6u);
   EXPECT_EQ(colr_x1->full_range_flag, 1u);
 
-  // Codecs string matches av2-isobmff #codecsparam example (with av2E 4CC)
+  // Codecs string matches y-guyon/bitdepth:
+  // <sample_entry_4cc>.<max_profile_idc><max_level_idx><max_tier><max_bit_depth_idc>
   const auto* first_sh = dynamic_cast<const SequenceHeaderOBU*>(parser.obus()[1].get());
   ASSERT_NE(first_sh, nullptr);
   std::string codecs = build_codecs_string("av2E", first_sh->sequence_header(), pixi, *colr_opt);
-  EXPECT_EQ(codecs, "av2E.0.04M.10.4.22.09.16.09.0");
-
-  // Default suffix ".3.22.01.01.01.0" should be omitted
-  PixiBox default_pixi;
-  default_pixi.channels.assign(pixi.channels.begin(), pixi.channels.begin() + 3);
-  ColrInfo default_colr{1, 1, 1, 0};
-  std::string short_codecs =
-      build_codecs_string("av2E", first_sh->sequence_header(), default_pixi, default_colr);
-  EXPECT_EQ(short_codecs, "av2E.0.04M.10");
+  EXPECT_EQ(codecs, "av2E.04M0");
+  EXPECT_EQ(build_codecs_string("av2e", 0, 0, 0, 0), "av2e.00M0");
+  EXPECT_EQ(build_codecs_string("av2e", 4, 10, 1, 1), "av2e.4AH1");
+  EXPECT_EQ(build_codecs_string("av2E", 31, 31, 0, 2), "av2E.VVM2");
 
   std::remove(fname.c_str());
 }
@@ -1062,6 +1064,73 @@ TEST(AV2ISOBMFFTest, MultiCVSOutOfBandRoundTrip) {
   std::remove(in_obu.c_str());
   std::remove(out_mp4.c_str());
   std::remove(out_obu.c_str());
+}
+
+TEST(AV2ISOBMFFTest, MaxProfileIdcFeatureLattice) {
+  // Identical profiles combine to themselves
+  for (uint8_t p : {uint8_t{0}, uint8_t{1}, uint8_t{2}, uint8_t{3}, uint8_t{4}, uint8_t{5},
+                    uint8_t{31}}) {
+    EXPECT_EQ(combine_av2_profiles(p, p), p);
+  }
+  // Profiles 0 and 1 are subsets of all higher profiles
+  EXPECT_EQ(combine_av2_profiles(0, 3), 3u);
+  EXPECT_EQ(combine_av2_profiles(1, 4), 4u);
+  // Profiles 2 (IP2 4:2:0), 3 (IP1 4:2:2), and 4 (IP1 4:4:4) are incomparable -> promote to 5
+  EXPECT_EQ(combine_av2_profiles(3, 4), 5u);
+  EXPECT_EQ(combine_av2_profiles(4, 3), 5u);
+  EXPECT_EQ(combine_av2_profiles(2, 3), 5u);
+  EXPECT_EQ(combine_av2_profiles(2, 4), 5u);
+
+  // Verify InBandAV2CodecConfigurationBox::from_parser with SH(profile=3) + MSDO(profile=4) -> 5
+  std::vector<uint8_t> stream;
+  auto append = [&](const std::vector<uint8_t>& b) {
+    stream.insert(stream.end(), b.begin(), b.end());
+  };
+  append(make_td_obu());
+  append(make_msdo_obu(/*num_streams=*/2, /*profile_idc=*/4, /*level_idx=*/8, /*tier=*/0));
+  append(make_seq_header_obu(/*xlayer_id=*/0, /*profile_idc=*/3, /*level_idx=*/4, /*tier=*/0,
+                             CHROMA_FORMAT_422, /*bit_depth_idc=*/1));
+  append(make_seq_header_obu(/*xlayer_id=*/1, /*profile_idc=*/4, /*level_idx=*/8, /*tier=*/0,
+                             CHROMA_FORMAT_444, /*bit_depth_idc=*/1));
+  append(make_clk_obu(0, 0));
+
+  const std::string path = "test_max_profile_lattice.obu";
+  write_bytes_to_file(path, stream);
+  OBUParser parser;
+  ASSERT_TRUE(parser.parse_file(path));
+
+  auto av2c = InBandAV2CodecConfigurationBox::from_parser(parser);
+  EXPECT_EQ(av2c.max_profile_idc, 5u);
+  EXPECT_EQ(av2c.max_level_idx, 8u);
+  EXPECT_EQ(av2c.max_tier, 0u);
+  EXPECT_EQ(av2c.max_bit_depth_idc, 1u);
+  std::remove(path.c_str());
+}
+
+TEST(AV2ISOBMFFTest, LayerOrderAndReconstructionPointIds) {
+  std::vector<std::pair<uint8_t, uint8_t>> ordered = {{0, 0}, {0, 1}, {2, 0}};
+  EXPECT_EQ(find_layer_order_index(ordered, 0, 0), 0);
+  EXPECT_EQ(find_layer_order_index(ordered, 0, 1), 1);
+  EXPECT_EQ(find_layer_order_index(ordered, 2, 0), 2);
+  EXPECT_EQ(find_layer_order_index(ordered, 1, 0), -1);
+
+  // Bitset for {0, 0} and {2, 0} -> 2^0 + 2^2 = 5
+  EXPECT_EQ(compute_layer_bitset(ordered, {{0, 0}, {2, 0}}), 5u);
+
+  uint16_t rp_id = 0;
+  ASSERT_TRUE(
+      make_reconstruction_point_id(/*obu_xlayer_id=*/31, /*ops_id=*/2, /*op_index=*/0, rp_id));
+  EXPECT_EQ(rp_id, static_cast<uint16_t>((31u << 7) | (2u << 3) | 0u));
+
+  uint8_t xid = 0, ops_id = 0, op_idx = 0;
+  ASSERT_TRUE(parse_reconstruction_point_id(rp_id, xid, ops_id, op_idx));
+  EXPECT_EQ(xid, 31u);
+  EXPECT_EQ(ops_id, 2u);
+  EXPECT_EQ(op_idx, 0u);
+
+  // op_index == 7 (3 LSBs all ones) is invalid because ops_cnt <= 7 -> op_index in 0..6
+  EXPECT_FALSE(make_reconstruction_point_id(0, 0, 7, rp_id));
+  EXPECT_FALSE(parse_reconstruction_point_id(0x0007, xid, ops_id, op_idx));
 }
 
 }  // namespace

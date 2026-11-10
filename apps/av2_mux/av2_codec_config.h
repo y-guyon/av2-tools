@@ -81,23 +81,27 @@ inline bool operator!=(const OutOfBandAV2CodecConfigurationBox& a,
 
 // InBandAV2CodecConfigurationBox ('av2c') per av2-isobmff:
 //   aligned(8) class InBandAV2CodecConfigurationBox extends AV2CodecConfigurationBox('av2c') {
-//     unsigned int(3) reserved1 = 0;
-//     unsigned int(2) max_num_streams_minus_1;
+//     unsigned int(2) max_num_streams_minus1;
 //     unsigned int(5) max_profile_idc;
 //     unsigned int(5) max_level_idx;
 //     unsigned int(1) max_tier;
+//     unsigned int(3) max_bit_depth_idc;
 //   }
 struct InBandAV2CodecConfigurationBox {
-  uint8_t reserved1 = 0;
-  uint8_t max_num_streams_minus_1 = 0;
+  uint8_t max_num_streams_minus1 = 0;
   uint8_t max_profile_idc = 0;
   uint8_t max_level_idx = 0;
   uint8_t max_tier = 0;
+  uint8_t max_bit_depth_idc = 1;  // Default to 8-bit (idc=1) when no SH/LCR is present
 
   std::vector<uint8_t> serialize() const;
   static bool parse(const uint8_t* data, size_t size, InBandAV2CodecConfigurationBox& out);
   static InBandAV2CodecConfigurationBox from_parser(const OBUParser& parser);
 };
+
+// Returns the lowest AV2 profile_idc (per AV2 Table A.4 and av2-isobmff #av2c-semantics)
+// whose allowed feature set includes all features allowed by both `a` and `b`.
+uint8_t combine_av2_profiles(uint8_t a, uint8_t b);
 
 // Extended PixelInformationBox ('pixi', version = 0, px_flags = 1) per ISOBMFF 9th Ed. §12.1.11.
 struct PixiChannel {
@@ -124,10 +128,39 @@ struct PixiBox {
   static PixiBox from_parser(const OBUParser& parser, uint8_t target_xlayer_id = 0);
 };
 
-// Builds the RFC 6381 Codecs parameter string per av2-isobmff #codecsparam.
+// Builds the RFC 6381 Codecs parameter string per av2-isobmff #codecsparam:
+// <sample_entry_4cc>.<max_profile_idc><max_level_idx><max_tier><max_bit_depth_idc>
+std::string build_codecs_string(const std::string& sample_entry_4cc,
+                                uint8_t max_profile_idc,
+                                uint8_t max_level_idx,
+                                uint8_t max_tier,
+                                uint8_t max_bit_depth_idc = 1);
+std::string build_codecs_string(const std::string& sample_entry_4cc,
+                                const InBandAV2CodecConfigurationBox& inband);
 std::string build_codecs_string(const std::string& sample_entry_4cc,
                                 const AV2SequenceHeader& first_sh,
                                 const PixiBox& pixi,
                                 const ColrInfo& colr);
+
+// Layer and reconstruction point identifiers per av2-isobmff #layer-order (y-guyon/layers):
+// Returns the ordered list of present (xlayer_id, mlayer_id) pairs in increasing xlayer_id,
+// then increasing mlayer_id order.
+std::vector<std::pair<uint8_t, uint8_t>> collect_ordered_layers(const OBUParser& parser);
+
+// Returns the 0-based layer index for (xlayer_id, mlayer_id) in `ordered_layers`, or -1 if absent.
+int find_layer_order_index(const std::vector<std::pair<uint8_t, uint8_t>>& ordered_layers,
+                           uint8_t xlayer_id, uint8_t mlayer_id);
+
+// Computes the layer bitset (sum of 2^idx) for a subset of layers.
+uint64_t compute_layer_bitset(const std::vector<std::pair<uint8_t, uint8_t>>& ordered_layers,
+                              const std::vector<std::pair<uint8_t, uint8_t>>& selected_layers);
+
+// Encodes/decodes the 12-bit reconstruction point ID:
+//   (obu_xlayer_id << 7) | (ops_id << 3) | op_index
+// where op_index is in 0..6 (3 LSBs shall not be all ones).
+bool make_reconstruction_point_id(uint8_t obu_xlayer_id, uint8_t ops_id, uint8_t op_index,
+                                  uint16_t& out_id);
+bool parse_reconstruction_point_id(uint16_t id, uint8_t& out_obu_xlayer_id, uint8_t& out_ops_id,
+                                   uint8_t& out_op_index);
 
 }  // namespace av2_obu
