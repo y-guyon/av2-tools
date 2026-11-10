@@ -1250,5 +1250,61 @@ TEST(AV2ISOBMFFTest, ColorDescriptionIdcPresetsAndMultistreamSyncAndCarryForward
   std::remove(ms_demux.c_str());
 }
 
+TEST(AV2ISOBMFFTest, SampleReconstructionDiscardsPossiblyOutOfBandObusInSample) {
+  // Per av2-isobmff PR #123 (#av2-sample-reconstruction Step 2 & Step 3):
+  // When reconstructing a sample from an OutOfBandAV2SampleEntry ('av2E'):
+  //   Step 2 writes the Possibly out-of-band OBUs from 'av2C' in their 'av2C' order,
+  //   Step 3 discards all Possibly out-of-band OBUs carried in the sample,
+  //   Step 4 writes the remaining (In-band) OBUs carried in the sample.
+  const auto sh_bytes = make_seq_header_obu(0, 0, 1, 0, CHROMA_FORMAT_420, 1, 176, 144);
+  const auto clk_bytes = make_clk_obu(0, 0);
+  const auto inter_bytes = make_inter_tile_group_obu(0, 1);
+
+  OutOfBandAV2CodecConfigurationBox av2c;
+  ASSERT_TRUE(av2c.append_raw_config_obu(sh_bytes));
+
+  Mp4Writer writer;
+  ASSERT_TRUE(writer.add_video_track_outofband(30000, 176, 144, av2c));
+  ASSERT_TRUE(writer.add_colr_nclx(ColrInfo{2, 2, 2, 0}, 1));
+  PixiBox pixi;
+  pixi.channels = {{8, 2, 0, false, 0, 0, ""},
+                   {8, 3, 0, true, 2, 0, ""},
+                   {8, 4, 0, true, 2, 0, ""}};
+  ASSERT_TRUE(writer.add_pixi(pixi, 1));
+
+  // Sample 0 (sync) carries a duplicate Possibly out-of-band OBU (SH) + In-band CLK.
+  std::vector<uint8_t> s0;
+  s0.insert(s0.end(), sh_bytes.begin(), sh_bytes.end());
+  s0.insert(s0.end(), clk_bytes.begin(), clk_bytes.end());
+  ASSERT_TRUE(writer.add_sample(s0, 1000, /*is_sync=*/true, 0, 1));
+
+  // Sample 1 (non-sync) also carries a duplicate Possibly out-of-band OBU (SH) + In-band inter frame.
+  // Step 3 must discard the Possibly out-of-band OBU even in non-sync samples where Step 2 skips
+  // re-injecting 'av2C'.
+  std::vector<uint8_t> s1;
+  s1.insert(s1.end(), sh_bytes.begin(), sh_bytes.end());
+  s1.insert(s1.end(), inter_bytes.begin(), inter_bytes.end());
+  ASSERT_TRUE(writer.add_sample(s1, 1000, /*is_sync=*/false, 0, 1));
+
+  const std::string mp4_path = "test_pr123_oob_discard.mp4";
+  const std::string obu_path = "test_pr123_oob_discard.obu";
+  ASSERT_TRUE(writer.finalize(mp4_path));
+  ASSERT_TRUE(Av2Demuxer().demux(mp4_path, obu_path));
+
+  OBUParser parser;
+  ASSERT_TRUE(parser.parse_file(obu_path));
+  ASSERT_EQ(parser.temporal_units().size(), 2u);
+  // TU 0 has exactly 1 SH (from 'av2C'; sample's SH discarded) + 1 CLK
+  ASSERT_EQ(parser.temporal_units()[0].obus().size(), 2u);
+  EXPECT_EQ(parser.temporal_units()[0].obus()[0]->type(), OBUType::SEQUENCE_HEADER);
+  EXPECT_EQ(parser.temporal_units()[0].obus()[1]->type(), OBUType::CLK);
+  // TU 1 has only the REGULAR_TILE_GROUP (sample's SH discarded in Step 3)
+  ASSERT_EQ(parser.temporal_units()[1].obus().size(), 1u);
+  EXPECT_EQ(parser.temporal_units()[1].obus()[0]->type(), OBUType::REGULAR_TILE_GROUP);
+
+  std::remove(mp4_path.c_str());
+  std::remove(obu_path.c_str());
+}
+
 }  // namespace
 }  // namespace av2_obu

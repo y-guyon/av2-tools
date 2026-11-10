@@ -109,6 +109,23 @@ bool sample_has_rap_frame(const std::vector<AnnexBObuSlice>& obus) {
   return false;
 }
 
+// Returns true if `s` is a "Possibly out-of-band OBU" per av2-isobmff #av2c / #av2-sample-reconstruction.
+bool is_possibly_oob_obu(const AnnexBObuSlice& s) {
+  switch (s.obu_type) {
+    case 1:   // OBU_SEQUENCE_HEADER
+    case 16:  // OBU_LAYER_CONFIGURATION_RECORD
+    case 17:  // OBU_ATLAS_SEGMENT
+    case 18:  // OBU_OPERATING_POINT_SET
+    case 20:  // OBU_MSDO
+      return true;
+    case 8:   // OBU_METADATA_SHORT
+    case 9:   // OBU_METADATA_GROUP
+      return s.is_global_prefix_metadata != 0;
+    default:
+      return false;
+  }
+}
+
 // Find the first track whose sample entry type is 'av2E' or 'av2e'.
 uint32_t find_av2_track(MP4Movie movie, uint32_t* out_track_count, uint32_t* out_entry_type) {
   uint32_t count = 0;
@@ -339,53 +356,35 @@ bool Av2Demuxer::demux(const std::string& input_mp4, const std::string& output_o
       out.write(reinterpret_cast<const char*>(kTdBytes), sizeof(kTdBytes));
     }
 
-    // Inject out-of-band config OBUs at sample 1, when sample entry changes, or at any
-    // random access point (sync sample or OLK/RAS frame) per AV2 §7.3.6.1.
+    // Step 2: If there is an OutOfBandAV2CodecConfigurationBox ('av2C') in the corresponding
+    // AV2SampleEntry, write the Possibly out-of-band OBUs it carries, in the same order as
+    // present in 'av2C'. Per the NOTE in #av2-sample-reconstruction Step 2 and AV2 §7.3.6.1,
+    // prepending is done at sample 1, when the sample entry changes, and at random access points.
+    const bool is_oob_entry = (cfg.box_type == kAtomTypeAv2C);
     const bool is_sync = (flags & MP4MediaSampleNotSync) == 0;
     const bool inject_config =
-        (cfg.box_type == kAtomTypeAv2C) &&
+        is_oob_entry &&
         (i == 1 || desc_idx != prev_desc_idx || is_sync || sample_has_rap_frame(sample_slices));
     prev_desc_idx = desc_idx;
 
     if (inject_config && !cfg.slices.empty()) {
-      // Write global-scope config OBUs first, then any global prefix metadata OBUs from the
-      // sample, then the grouped HLS block from config_obus, preserving AV2 §7.3.5 ordering.
-      size_t cfg_idx = 0;
-      while (cfg_idx < cfg.slices.size() && cfg.slices[cfg_idx].xlayer_id == 31) {
-        out.write(reinterpret_cast<const char*>(cfg.slices[cfg_idx].data),
-                  static_cast<std::streamsize>(cfg.slices[cfg_idx].total_len));
-        ++cfg_idx;
-      }
-      while (start_slice_idx < sample_slices.size() &&
-             sample_slices[start_slice_idx].is_global_prefix_metadata) {
-        out.write(reinterpret_cast<const char*>(sample_slices[start_slice_idx].data),
-                  static_cast<std::streamsize>(sample_slices[start_slice_idx].total_len));
-        ++start_slice_idx;
-      }
-      while (cfg_idx < cfg.slices.size()) {
-        out.write(reinterpret_cast<const char*>(cfg.slices[cfg_idx].data),
-                  static_cast<std::streamsize>(cfg.slices[cfg_idx].total_len));
-        ++cfg_idx;
+      for (const auto& c : cfg.slices) {
+        out.write(reinterpret_cast<const char*>(c.data),
+                  static_cast<std::streamsize>(c.total_len));
       }
       total_config_bytes += cfg.config_obus_size;
     }
 
-    // Write remaining sample OBUs, skipping any bit-exact duplicates of injected config OBUs.
+    // Step 3: If there is an OutOfBandAV2CodecConfigurationBox in the corresponding
+    // AV2SampleEntry, discard all Possibly out-of-band OBUs carried in the sample.
+    // Step 4: Write the remaining OBUs carried in the sample, in the same order as present.
     for (size_t s_idx = start_slice_idx; s_idx < sample_slices.size(); ++s_idx) {
       const auto& s = sample_slices[s_idx];
-      bool is_dup_cfg = false;
-      if (inject_config) {
-        for (const auto& c : cfg.slices) {
-          if (c.total_len == s.total_len && std::memcmp(c.data, s.data, s.total_len) == 0) {
-            is_dup_cfg = true;
-            break;
-          }
-        }
+      if (is_oob_entry && is_possibly_oob_obu(s)) {
+        continue;
       }
-      if (!is_dup_cfg) {
-        out.write(reinterpret_cast<const char*>(s.data),
-                  static_cast<std::streamsize>(s.total_len));
-      }
+      out.write(reinterpret_cast<const char*>(s.data),
+                static_cast<std::streamsize>(s.total_len));
     }
   }
 
